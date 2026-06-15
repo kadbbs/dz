@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Web 德州 Hold'em</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app">
+    <section class="table">
+      <header class="topbar">
+        <div>
+          <h1>Web 德州 Hold'em</h1>
+          <p id="status">未连接</p>
+        </div>
+        <form id="joinForm" class="join">
+          <input id="nameInput" autocomplete="name" placeholder="昵称" maxlength="24">
+          <input id="roomInput" placeholder="房间" value="demo" maxlength="32">
+          <button type="submit">入座</button>
+        </form>
+      </header>
+
+      <div class="board">
+        <div class="meta">
+          <span id="phase">waiting</span>
+          <strong id="pot">底池 0</strong>
+        </div>
+        <div id="community" class="cards"></div>
+      </div>
+
+      <div id="players" class="players"></div>
+
+      <footer class="controls">
+        <button id="startBtn">开局</button>
+        <button id="sitOutBtn">旁观</button>
+        <button data-action="fold">弃牌</button>
+        <button data-action="check">过牌</button>
+        <button data-action="call">跟注</button>
+        <label>
+          <span>加注到</span>
+          <input id="raiseAmount" type="number" min="20" step="10" value="40">
+        </label>
+        <button data-action="raise">加注</button>
+      </footer>
+    </section>
+
+    <aside class="side">
+      <section class="panel self">
+        <h2>手牌</h2>
+        <div id="hole" class="cards"></div>
+      </section>
+
+      <section class="panel room-tools">
+        <div class="panel-title">
+          <h2>房间</h2>
+          <button id="helpBtn" class="icon-button" type="button" aria-label="牌型帮助">?</button>
+        </div>
+        <label class="mode-row">
+          <span>玩法</span>
+          <select id="modeSelect">
+            <option value="holdem">标准德州</option>
+            <option value="shortdeck">短牌 6+</option>
+          </select>
+        </label>
+        <form id="transferForm" class="transfer">
+          <select id="transferTarget" aria-label="转移目标"></select>
+          <input id="transferAmount" type="number" min="1" step="1" value="100" aria-label="转移筹码数量">
+          <button type="submit">转移</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>视频</h2>
+        <div class="video-grid">
+          <video id="localVideo" autoplay muted playsinline></video>
+          <div id="remoteVideos"></div>
+        </div>
+      </section>
+
+      <section class="panel log-panel">
+        <h2>牌桌记录</h2>
+        <ol id="log"></ol>
+      </section>
+    </aside>
+  </main>
+
+  <dialog id="helpDialog" class="help-dialog">
+    <div class="dialog-head">
+      <h2 id="helpTitle">牌型大小</h2>
+      <button id="closeHelpBtn" class="icon-button" type="button" aria-label="关闭">×</button>
+    </div>
+    <ol id="rankingList"></ol>
+    <p id="helpNote"></p>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>

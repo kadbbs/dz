@@ -1,0 +1,270 @@
+# 多人 Web 德州 + WebRTC 参考项目
+
+这是一个 C++ 后端 + Web 前端的多人德州 Hold'em 项目骨架：
+
+- C++20 / Boost.Beast 提供 HTTP 静态资源服务和 WebSocket。
+- C++ 后端负责房间、座位、牌局状态、下注轮次、广播和 WebRTC 信令转发。
+- 浏览器前端负责桌面 UI、牌局操作、WebSocket 通信和 WebRTC 音视频。
+- WebRTC 音视频走浏览器原生 `RTCPeerConnection`，C++ 服务端只做信令，不转发媒体流。
+- 支持标准德州和短牌 6+ 两种玩法。
+
+## 依赖
+
+Ubuntu/Debian:
+
+```bash
+sudo apt-get install -y build-essential cmake libboost-system-dev
+```
+
+## 编译运行
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+./build/web_texas_webrtc 0.0.0.0 8080
+```
+
+打开：
+
+```text
+http://localhost:8080
+```
+
+多开几个浏览器窗口，输入同一个房间号即可测试多人牌局和 WebRTC 连接。
+
+## 业务逻辑
+
+项目可以按 4 条主线理解：连接、房间、牌局、音视频。
+
+### 1. 连接层
+
+- 浏览器打开页面后连接 `/ws`。
+- C++ 服务端创建一个 `WsSession`，分配玩家临时 id，例如 `p1`。
+- 后续所有业务消息都走 WebSocket JSON。
+- HTTP 只负责返回 `web/` 下的静态页面、样式和脚本。
+
+核心代码：
+
+- `HttpSession`: 处理 HTTP 请求和 WebSocket upgrade。
+- `WsSession`: 维护单个浏览器连接，负责异步收发。
+- `GameHub`: 管理所有连接、房间、广播和消息分发。
+
+### 2. 房间层
+
+玩家提交：
+
+```json
+{"type":"join","room":"demo","name":"Alice"}
+```
+
+服务端处理流程：
+
+1. 根据 `room` 找到或创建房间。
+2. 把当前连接加入房间玩家列表。
+3. 给当前玩家返回 `welcome`。
+4. 给房间内所有玩家广播 `peer-joined`。
+5. 广播最新 `state`。
+
+房间当前只保存在内存里，服务重启后会清空。玩家断线时会从房间移除，如果房间没人了，房间对象也会被删除。
+
+房间成员和牌局玩家是分开的：
+
+- 所有房间成员都能看到牌桌、玩家状态、公共牌和牌桌记录。
+- 玩家可以切换到旁观状态，继续留在房间内观看。
+- 旁观玩家不会在下一手被发牌，也不会下盲注或获得行动权。
+- 如果玩家在一手牌进行中切换旁观，服务端会把他视为弃牌，本手不再参与。
+- 玩家回到牌局后，从下一手开始重新参与。
+- 同一个连接重新加入其他房间时，会从旧房间移除，避免同时出现在多个房间。
+
+房间内筹码转移：
+
+- 客户端发送 `transfer` 可以把筹码转给同房间其他玩家。
+- 为避免影响当前手牌公平性，筹码转移只允许在 `waiting` 状态进行。
+- 转移成功后，服务端广播最新玩家筹码和牌桌事件。
+
+房间玩法：
+
+- 房间支持 `holdem` 标准德州和 `shortdeck` 短牌 6+。
+- 玩法只能在 `waiting` 状态切换，一手牌开始后本手规则锁定。
+- 前端房间面板可以切换玩法，帮助按钮会显示当前玩法的牌型大小。
+
+### 3. 牌局层
+
+牌局状态主要由 `Room` 保存：
+
+- `players`: 玩家、筹码、当前下注、是否弃牌、手牌。
+- `committed`: 玩家本手累计投入，用于主池和边池切分。
+- `sittingOut`: 玩家是否暂时旁观。
+- `mode`: 当前玩法，`holdem` 或 `shortdeck`。
+- `deck`: 洗好的牌堆。
+- `community`: 公共牌。
+- `phase`: 当前阶段，包含 `waiting`、`preflop`、`flop`、`turn`、`river`、`showdown`。
+- `dealer`: 庄家位置。
+- `current`: 当前行动玩家位置。
+- `highest_bet`: 当前轮最高下注。
+- `min_raise`: 当前轮最小加注额，默认一个大盲；完整加注后会更新为本次加注差额。
+- `pot`: 底池。
+- `acted`: 本轮已经行动过的玩家。
+
+开局流程：
+
+1. 至少 2 名未旁观且有筹码的玩家才能开局。
+2. 当前房间必须处于 `waiting` 状态，牌局中不能重复开局。
+3. 洗牌。
+4. 每名玩家发 2 张手牌。
+5. 庄家按钮移动到下一位。
+6. 小盲和大盲自动下注。
+7. 行动权从大盲后一位开始。
+8. 广播公共状态，并单独发送每个玩家自己的手牌。
+
+行动流程：
+
+客户端发送：
+
+```json
+{"type":"action","action":"call","amount":20}
+```
+
+支持的动作：
+
+- `fold`: 弃牌。
+- `check`: 过牌，只有无需跟注时有效。
+- `call`: 跟到当前最高下注，已有下注差额时才有效；筹码不足时会 all-in 跟注。
+- `raise`: 加注到 `amount`，这里的 `amount` 是本轮自己的总下注额，不是“再加多少”。
+
+加注规则：
+
+- 如果当前轮没人下注，第一次下注至少到一个大盲，短筹码可以 all-in。
+- 如果已经有人下注，完整加注至少到 `highestBet + minRaise`。
+- 如果玩家筹码不足以完成最小加注，可以 all-in 到自己的最大可下注额。
+- 短 all-in 会提高其他玩家需要跟注的金额，但不会按完整加注重置最小加注额。
+- 完整加注会更新 `minRaise`，并让其他未弃牌、未 all-in 玩家重新获得响应机会。
+
+每次行动后服务端会：
+
+1. 校验是不是当前玩家行动。
+2. 修改玩家下注、筹码、弃牌或 all-in 状态。
+3. 判断是否只剩一名未弃牌玩家。
+4. 判断当前下注轮是否结束。
+5. 必要时进入下一阶段并发公共牌。
+6. 如果剩余玩家都 all-in，会自动发完公共牌并进入摊牌。
+7. 广播最新 `state` 和 `event`。
+
+摊牌结算：
+
+- 服务端会从每名未弃牌玩家的 2 张手牌 + 5 张公共牌中枚举最佳 5 张牌。
+- 标准德州牌型比较顺序为：同花顺、四条、葫芦、同花、顺子、三条、两对、一对、高牌。
+- 短牌 6+ 牌型比较顺序为：同花顺、四条、同花、葫芦、三条、顺子、两对、一对、高牌。
+- 短牌只使用 6 到 A 共 36 张牌，A 可以组成 A-6-7-8-9 顺子。
+- 每名玩家本手累计投入记录在 `committed`。
+- 结算时按不同 `committed` 层级切主池和边池。
+- 已弃牌玩家的投入仍留在对应底池内，但不能参与赢池。
+- 同牌型同踢脚时平分对应底池，无法整除的余数按当前座位顺序补给赢家。
+
+### 4. 状态广播
+
+服务端广播两类状态：
+
+公共状态 `state` 会发给房间内所有玩家：
+
+```json
+{
+  "type": "state",
+  "room": "demo",
+  "phase": "flop",
+  "mode": "shortdeck",
+  "pot": 120,
+  "highestBet": 40,
+  "minRaise": 20,
+  "smallBlind": 10,
+  "bigBlind": 20,
+  "dealer": "p1",
+  "toAct": "p2",
+  "community": ["As", "Th", "7d"],
+  "players": [
+    {"id":"p1","name":"Alice","chips":1960,"bet":40,"committed":80,"folded":false,"allIn":false}
+  ]
+}
+```
+
+私有状态 `private` 只发给对应玩家：
+
+```json
+{"type":"private","cards":["Ah","Kd"]}
+```
+
+这样可以避免把其他玩家手牌泄露给前端。
+
+## WebRTC 说明
+
+本项目的 WebRTC 是“浏览器点对点音视频 + C++ WebSocket 信令”模式：
+
+1. 用户进入房间后，前端请求摄像头/麦克风。
+2. 前端通过 WebSocket 发送 `rtc-offer`、`rtc-answer`、`rtc-ice`。
+3. C++ 服务端按 `to` 字段把信令转发给目标玩家。
+4. 媒体流不经过 C++ 服务端。
+
+局域网和 localhost 通常可以直接连通。公网部署需要 TURN 服务，否则 NAT 环境下音视频可能无法建立。
+
+音视频业务流程：
+
+1. 玩家入座前，前端尝试请求摄像头和麦克风权限。
+2. 前端根据房间内其他玩家 id 建立 `RTCPeerConnection`。
+3. id 较小的一方主动创建 offer，避免双方同时发起。
+4. `rtc-offer`、`rtc-answer`、`rtc-ice` 通过 C++ WebSocket 服务端按 `to` 字段转发。
+5. 服务端只允许同房间玩家之间转发 WebRTC 信令。
+6. 浏览器之间直接传输音视频媒体流。
+
+C++ 服务端不处理音视频编码、解码和转发，只负责信令路由。这是 WebRTC 项目最常见的轻量模式。
+
+## 服务端模块划分
+
+当前为了便于阅读，C++ 代码集中在 `src/main.cpp`。后续可以按下面方式拆分：
+
+```text
+src/
+  main.cpp              # 启动 io_context 和 listener
+  net/http_session.*    # HTTP 静态资源和 WebSocket upgrade
+  net/ws_session.*      # WebSocket 连接收发
+  game/game_hub.*       # 房间、连接、广播、信令分发
+  game/room.*           # Room/Player/Card 数据结构
+  game/poker_engine.*   # 发牌、下注轮、阶段推进、结算
+  game/hand_eval.*      # 手牌评估器
+```
+
+生产项目里，建议让 `GameHub` 只做调度，把德州规则从网络层中拆出来。这样以后接数据库、鉴权、机器人或观战模式时不会把网络代码和牌局规则搅在一起。
+
+## 协议消息
+
+客户端发给服务端：
+
+```json
+{"type":"join","room":"demo","name":"Alice"}
+{"type":"mode","mode":"shortdeck"}
+{"type":"start"}
+{"type":"action","action":"call","amount":20}
+{"type":"sitout","sittingOut":true}
+{"type":"transfer","to":"player-id","amount":100}
+{"type":"rtc-offer","to":"player-id","sdp":"..."}
+{"type":"rtc-answer","to":"player-id","sdp":"..."}
+{"type":"rtc-ice","to":"player-id","candidate":"...","sdpMid":"0","sdpMLineIndex":0}
+```
+
+服务端会广播：
+
+```json
+{"type":"welcome","id":"...","room":"demo"}
+{"type":"state","players":[{"id":"...","chips":1900,"committed":100,"sittingOut":false}],"community":[...],"pot":120,"toAct":"..."}
+{"type":"event","message":"Alice call 20"}
+{"type":"peer-joined","id":"...","name":"Alice"}
+{"type":"peer-left","id":"..."}
+```
+
+## 当前范围
+
+这是可运行的参考实现，不是生产级真钱牌局服务。生产化还需要：
+
+- 更严格的回合状态机与断线重连。
+- 服务端鉴权、房间权限、限流、防作弊审计。
+- TLS/WSS 部署。
+- TURN 服务和媒体权限错误处理。
