@@ -1,20 +1,26 @@
 # 多人 Web 德州 + WebRTC 参考项目
 
-这是一个 C++ 后端 + Web 前端的多人德州 Hold'em 项目骨架：
+这是一个 C++ 后端 + Web 前端 + mediasoup SFU 的多人德州 Hold'em 项目骨架：
 
 - C++20 / Boost.Beast 提供 HTTP 静态资源服务和 WebSocket。
 - C++ 后端负责房间、座位、牌局状态、下注轮次、广播和 WebRTC 信令转发。
-- 浏览器前端负责桌面 UI、牌局操作、WebSocket 通信和 WebRTC 音视频。
-- WebRTC 音视频走浏览器原生 `RTCPeerConnection`，C++ 服务端只做信令，不转发媒体流。
+- 浏览器前端负责桌面 UI、牌局操作、WebSocket 通信和 mediasoup 音视频接入。
+- 音视频走独立 mediasoup SFU；C++ 后端只负责牌局，不转发媒体流。
 - 支持标准德州和短牌 6+ 两种玩法。
 
 ## 依赖
 
-Ubuntu/Debian:
+C++ 服务依赖：
 
 ```bash
 sudo apt-get install -y build-essential cmake libboost-system-dev
 ```
+
+音视频依赖：
+
+- Node.js 22+，用于运行 mediasoup 信令/SFU 服务。
+- HTTPS/WSS 域名证书，手机浏览器访问摄像头/麦克风必须使用安全上下文。
+- 生产环境建议准备 TURN 能力，并正确配置公网 `MEDIASOUP_ANNOUNCED_IP`。
 
 ## 编译运行
 
@@ -31,6 +37,32 @@ http://localhost:8080
 ```
 
 多开几个浏览器窗口，输入同一个房间号即可测试多人牌局和 WebRTC 连接。
+
+本地音视频需要先启动 mediasoup 服务：
+
+```bash
+cd mediasoup-server
+npm install
+npm start
+```
+
+默认配置：
+
+```text
+MEDIASOUP_SIGNAL_PORT=3001
+MEDIASOUP_LISTEN_IP=0.0.0.0
+MEDIASOUP_ANNOUNCED_IP=<自动探测的局域网 IP>
+MEDIASOUP_MIN_PORT=40000
+MEDIASOUP_MAX_PORT=49999
+```
+
+前端 mediasoup 信令地址在 `web/config.js`：
+
+```js
+window.DZ_CONFIG = {
+  mediasoupUrl: 'ws://localhost:3001',
+};
+```
 
 ## 业务逻辑
 
@@ -195,27 +227,132 @@ http://localhost:8080
 
 这样可以避免把其他玩家手牌泄露给前端。
 
-## WebRTC 说明
+## 音视频说明
 
-本项目的 WebRTC 是“浏览器点对点音视频 + C++ WebSocket 信令”模式：
+本项目的音视频是“浏览器 + mediasoup-client + mediasoup Node 服务”模式：
 
-1. 用户进入房间后，前端请求摄像头/麦克风。
-2. 前端通过 WebSocket 发送 `rtc-offer`、`rtc-answer`、`rtc-ice`。
-3. C++ 服务端按 `to` 字段把信令转发给目标玩家。
-4. 媒体流不经过 C++ 服务端。
+1. 用户加入牌局房间。
+2. 前端连接 `web/config.js` 中的 `mediasoupUrl`。
+3. 前端发送 `join`，mediasoup 服务按房间创建或复用 Router。
+4. 浏览器创建发送/接收 WebRTC transport。
+5. 浏览器把摄像头/麦克风 publish 成 producer。
+6. 同房间其他玩家收到 `newProducer` 后创建 consumer 订阅。
 
-局域网和 localhost 通常可以直接连通。公网部署需要 TURN 服务，否则 NAT 环境下音视频可能无法建立。
+这样多人桌不再是浏览器两两 mesh。每个玩家通常只上传一路音视频，mediasoup 负责按房间分发。
 
 音视频业务流程：
 
-1. 玩家入座前，前端尝试请求摄像头和麦克风权限。
-2. 前端根据房间内其他玩家 id 建立 `RTCPeerConnection`。
-3. id 较小的一方主动创建 offer，避免双方同时发起。
-4. `rtc-offer`、`rtc-answer`、`rtc-ice` 通过 C++ WebSocket 服务端按 `to` 字段转发。
-5. 服务端只允许同房间玩家之间转发 WebRTC 信令。
-6. 浏览器之间直接传输音视频媒体流。
+1. 玩家入座后，前端连接 mediasoup 信令服务。
+2. 前端启用摄像头和麦克风。
+3. 本地视频显示在 `localVideo`。
+4. 远端玩家发布的轨道会显示到 `remoteVideos`。
+5. 玩家离开 mediasoup 房间时，远端视频自动移除。
 
-C++ 服务端不处理音视频编码、解码和转发，只负责信令路由。这是 WebRTC 项目最常见的轻量模式。
+C++ 服务端不处理音视频编码、解码和转发，只负责牌局状态和房间业务。
+
+## 部署
+
+### 需要的东西
+
+- 一台公网服务器。
+- 两个域名或子域名：
+  - `dz.example.com`: 牌局 Web 服务。
+  - `media.example.com`: mediasoup 信令/SFU 服务。
+- Node.js 22+，用于部署 mediasoup 服务。
+- Caddy 或 Nginx，用于 HTTPS/WSS。
+- 开放防火墙端口：
+  - `80/tcp`、`443/tcp`: HTTPS 和证书签发。
+  - `3001/tcp`: mediasoup 信令服务，生产环境通常由反向代理转成 WSS。
+  - `40000-49999/udp,tcp`: mediasoup WebRTC 媒体端口。
+  - 如果单独配置 TURN，还需要对应 TURN 端口，例如 `3478/udp`、`3478/tcp`、`5349/tcp`。
+
+### 推荐架构
+
+```text
+Browser
+  | HTTPS/WSS
+  v
+Caddy/Nginx -> C++ dz service :8080
+
+Browser
+  | WSS/WebRTC/TURN
+  v
+mediasoup Node service
+```
+
+牌局和音视频分开部署：
+
+- C++ 服务管业务。
+- mediasoup 管多人音视频转发。
+
+### 牌局服务 HTTPS
+
+示例 Caddyfile：
+
+```caddyfile
+dz.example.com {
+  reverse_proxy 127.0.0.1:8080
+}
+```
+
+启动 C++ 服务：
+
+```bash
+./build/web_texas_webrtc 127.0.0.1 8080
+```
+
+前端配置：
+
+```js
+window.DZ_CONFIG = {
+  mediasoupUrl: 'wss://media.example.com',
+};
+```
+
+### mediasoup SFU
+
+本地开发可以用：
+
+```bash
+cd mediasoup-server
+npm install
+npm start
+```
+
+生产启动示例：
+
+```bash
+cd mediasoup-server
+MEDIASOUP_SIGNAL_PORT=3001 \
+MEDIASOUP_LISTEN_IP=0.0.0.0 \
+MEDIASOUP_ANNOUNCED_IP=<服务器公网 IP> \
+MEDIASOUP_MIN_PORT=40000 \
+MEDIASOUP_MAX_PORT=49999 \
+npm start
+```
+
+生产注意点：
+
+- `MEDIASOUP_ANNOUNCED_IP` 必须是浏览器可访问的公网 IP 或正确的外网地址。
+- `web/config.js` 的 `mediasoupUrl` 必须是公网可访问的 `wss://` 地址。
+- 手机浏览器必须通过 `https://dz.example.com` 访问牌局页面，否则摄像头/麦克风会被浏览器拒绝。
+- mediasoup 的媒体端口必须对公网开放，否则需要依赖 TURN。
+- 如果玩家在复杂 NAT、公司网络或移动网络下，TURN/TLS 是稳定性的关键。
+
+### 本地手机测试
+
+如果手机访问：
+
+```text
+http://电脑IP:8080
+```
+
+摄像头/麦克风大概率不可用，因为不是 HTTPS。可选方案：
+
+- 用 `localhost` 在电脑本机测试。
+- 给局域网服务配本地可信 HTTPS 证书。
+- 用 `ngrok`、`cloudflared tunnel` 这类工具临时提供 HTTPS 地址。
+- 直接部署到有域名和 HTTPS 的公网服务器。
 
 ## 服务端模块划分
 
@@ -245,9 +382,6 @@ src/
 {"type":"action","action":"call","amount":20}
 {"type":"sitout","sittingOut":true}
 {"type":"transfer","to":"player-id","amount":100}
-{"type":"rtc-offer","to":"player-id","sdp":"..."}
-{"type":"rtc-answer","to":"player-id","sdp":"..."}
-{"type":"rtc-ice","to":"player-id","candidate":"...","sdpMid":"0","sdpMLineIndex":0}
 ```
 
 服务端会广播：
@@ -267,4 +401,4 @@ src/
 - 更严格的回合状态机与断线重连。
 - 服务端鉴权、房间权限、限流、防作弊审计。
 - TLS/WSS 部署。
-- TURN 服务和媒体权限错误处理。
+- 生产级 TURN 凭证签发、过期控制和连接质量监控。

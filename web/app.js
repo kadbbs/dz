@@ -1,3 +1,5 @@
+import { Device } from 'https://esm.sh/mediasoup-client@3.21.0';
+
 const els = {
   status: document.querySelector('#status'),
   joinForm: document.querySelector('#joinForm'),
@@ -29,9 +31,9 @@ els.actionButtons = [...document.querySelectorAll('[data-action]')];
 
 let ws;
 let myId = '';
-let localStream;
+let mediaClient;
+let joinedGameRoom = '';
 let state = { players: [] };
-const peers = new Map();
 
 const handRankings = {
   holdem: [
@@ -93,14 +95,19 @@ async function handleMessage(msg) {
     return;
   }
   if (msg.type === 'welcome') {
+    if (mediaClient && joinedGameRoom !== msg.room) {
+      mediaClient.close();
+      mediaClient = null;
+    }
     myId = msg.id;
+    joinedGameRoom = msg.room;
     els.status.textContent = `房间 ${msg.room}，我的座位 ${msg.id}`;
+    connectMediasoup(msg.room).catch((err) => log(`音视频不可用：${err.message}`));
     return;
   }
   if (msg.type === 'state') {
     state = msg;
     renderState();
-    await syncPeers();
     return;
   }
   if (msg.type === 'private') {
@@ -111,24 +118,8 @@ async function handleMessage(msg) {
     log(msg.message);
     return;
   }
-  if (msg.type === 'rtc-offer') {
-    await onOffer(msg);
+  if (msg.type === 'peer-left') {
     return;
-  }
-  if (msg.type === 'rtc-answer') {
-    const pc = peers.get(msg.from);
-    if (pc) await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
-    return;
-  }
-  if (msg.type === 'rtc-ice') {
-    const pc = peers.get(msg.from);
-    if (pc && msg.candidate) {
-      await pc.addIceCandidate({
-        candidate: msg.candidate,
-        sdpMid: msg.sdpMid,
-        sdpMLineIndex: msg.sdpMLineIndex,
-      });
-    }
   }
 }
 
@@ -257,99 +248,173 @@ function escapeHtml(value) {
   }[c]));
 }
 
-async function ensureMedia() {
-  if (localStream) return localStream;
-  localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-  els.localVideo.srcObject = localStream;
-  return localStream;
+function waitForSocketOpen(socket) {
+  if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve, { once: true });
+    socket.addEventListener('error', () => reject(new Error('mediasoup 信令连接失败')), { once: true });
+  });
 }
 
-function createPeer(remoteId) {
-  if (peers.has(remoteId)) return peers.get(remoteId);
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-  });
-
-  if (localStream) {
-    for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
-  }
-
-  pc.addEventListener('icecandidate', (event) => {
-    if (!event.candidate) return;
-    send({
-      type: 'rtc-ice',
-      to: remoteId,
-      candidate: event.candidate.candidate,
-      sdpMid: event.candidate.sdpMid,
-      sdpMLineIndex: event.candidate.sdpMLineIndex,
+class MediasoupClient {
+  constructor(url) {
+    this.socket = new WebSocket(url);
+    this.nextRequestId = 1;
+    this.pending = new Map();
+    this.producers = new Map();
+    this.consumers = new Map();
+    this.device = new Device();
+    this.socket.addEventListener('message', (event) => this.handleMessage(JSON.parse(event.data)));
+    this.socket.addEventListener('close', () => {
+      this.close();
+      if (mediaClient === this) mediaClient = null;
+      log('mediasoup 信令已断开');
     });
-  });
-
-  pc.addEventListener('track', (event) => {
-    let video = document.querySelector(`video[data-peer="${remoteId}"]`);
-    if (!video) {
-      video = document.createElement('video');
-      video.dataset.peer = remoteId;
-      video.autoplay = true;
-      video.playsInline = true;
-      els.remoteVideos.append(video);
-    }
-    video.srcObject = event.streams[0];
-  });
-
-  pc.addEventListener('connectionstatechange', () => {
-    if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
-      removePeer(remoteId);
-    }
-  });
-
-  peers.set(remoteId, pc);
-  return pc;
-}
-
-function removePeer(remoteId) {
-  const pc = peers.get(remoteId);
-  if (pc) pc.close();
-  peers.delete(remoteId);
-  document.querySelector(`video[data-peer="${remoteId}"]`)?.remove();
-}
-
-async function syncPeers() {
-  if (!myId || !state.players?.length) return;
-  const ids = state.players.map((p) => p.id).filter((id) => id !== myId);
-
-  for (const id of peers.keys()) {
-    if (!ids.includes(id)) removePeer(id);
   }
 
-  if (!localStream) return;
-  for (const id of ids) {
-    const shouldOffer = myId < id;
-    if (!peers.has(id) && shouldOffer) {
-      const pc = createPeer(id);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      send({ type: 'rtc-offer', to: id, sdp: offer.sdp });
+  async start({ roomId, peerId, name }) {
+    await waitForSocketOpen(this.socket);
+    const joined = await this.request('join', { roomId, peerId, name });
+    await this.device.load({ routerRtpCapabilities: joined.routerRtpCapabilities });
+    await this.createTransports();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    els.localVideo.srcObject = stream;
+
+    for (const track of stream.getTracks()) {
+      const producer = await this.sendTransport.produce({ track });
+      this.producers.set(producer.id, producer);
+      producer.on('trackended', () => this.closeProducer(producer.id));
+      producer.on('transportclose', () => this.producers.delete(producer.id));
     }
+
+    for (const producerId of joined.producers || []) {
+      await this.consume(producerId);
+    }
+  }
+
+  async createTransports() {
+    const sendOptions = await this.request('createWebRtcTransport', { direction: 'send' });
+    this.sendTransport = this.device.createSendTransport(sendOptions);
+    this.sendTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+      this.request('connectTransport', {
+        transportId: this.sendTransport.id,
+        dtlsParameters,
+      }).then(callback).catch(errback);
+    });
+    this.sendTransport.on('produce', ({ kind, rtpParameters }, callback, errback) => {
+      this.request('produce', {
+        transportId: this.sendTransport.id,
+        kind,
+        rtpParameters,
+      }).then(({ id }) => callback({ id })).catch(errback);
+    });
+
+    const recvOptions = await this.request('createWebRtcTransport', { direction: 'recv' });
+    this.recvTransport = this.device.createRecvTransport(recvOptions);
+    this.recvTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
+      this.request('connectTransport', {
+        transportId: this.recvTransport.id,
+        dtlsParameters,
+      }).then(callback).catch(errback);
+    });
+  }
+
+  request(action, data = {}) {
+    const id = this.nextRequestId++;
+    this.socket.send(JSON.stringify({ id, action, data }));
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        this.pending.delete(id);
+        reject(new Error(`${action} 超时`));
+      }, 10000);
+    });
+  }
+
+  async consume(producerId) {
+    if (!this.recvTransport || this.consumers.has(producerId)) return;
+    const data = await this.request('consume', {
+      producerId,
+      rtpCapabilities: this.device.rtpCapabilities,
+    });
+    const consumer = await this.recvTransport.consume(data);
+    this.consumers.set(producerId, consumer);
+    const element = document.createElement(consumer.kind === 'video' ? 'video' : 'audio');
+    element.dataset.producer = producerId;
+    element.autoplay = true;
+    element.playsInline = true;
+    element.srcObject = new MediaStream([consumer.track]);
+    els.remoteVideos.append(element);
+    consumer.on('transportclose', () => this.removeConsumer(producerId));
+    await this.request('resumeConsumer', { consumerId: consumer.id });
+  }
+
+  handleMessage(message) {
+    if (message.id && this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      if (message.ok) pending.resolve(message.data);
+      else pending.reject(new Error(message.error || 'mediasoup 请求失败'));
+      return;
+    }
+    if (message.action === 'newProducer') {
+      this.consume(message.data.producerId).catch((err) => log(`订阅远端音视频失败：${err.message}`));
+      return;
+    }
+    if (message.action === 'producerClosed') {
+      this.removeConsumer(message.data.producerId);
+    }
+  }
+
+  removeConsumer(producerId) {
+    const consumer = this.consumers.get(producerId);
+    if (consumer) consumer.close();
+    this.consumers.delete(producerId);
+    document.querySelectorAll(`[data-producer="${producerId}"]`).forEach((el) => el.remove());
+  }
+
+  closeProducer(producerId) {
+    this.producers.get(producerId)?.close();
+    this.producers.delete(producerId);
+  }
+
+  close() {
+    for (const producer of this.producers.values()) producer.close();
+    for (const consumer of this.consumers.values()) consumer.close();
+    this.producers.clear();
+    this.consumers.clear();
+    this.sendTransport?.close();
+    this.recvTransport?.close();
+    this.sendTransport = null;
+    this.recvTransport = null;
+    els.localVideo.srcObject?.getTracks().forEach((track) => track.stop());
+    els.localVideo.srcObject = null;
+    els.remoteVideos.innerHTML = '';
   }
 }
 
-async function onOffer(msg) {
-  await ensureMedia();
-  const pc = createPeer(msg.from);
-  await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  send({ type: 'rtc-answer', to: msg.from, sdp: answer.sdp });
+async function connectMediasoup(gameRoom) {
+  if (mediaClient || !myId) return;
+  const mediasoupUrl = window.DZ_CONFIG?.mediasoupUrl;
+  if (!mediasoupUrl) throw new Error('缺少 DZ_CONFIG.mediasoupUrl');
+  const player = state.players?.find((item) => item.id === myId);
+  mediaClient = new MediasoupClient(mediasoupUrl);
+  try {
+    await mediaClient.start({
+      roomId: `dz-${gameRoom}`,
+      peerId: myId,
+      name: player?.name || myId,
+    });
+  } catch (err) {
+    mediaClient.close();
+    mediaClient = null;
+    throw err;
+  }
 }
 
 els.joinForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  try {
-    await ensureMedia();
-  } catch (err) {
-    log(`音视频不可用：${err.message}`);
-  }
   send({
     type: 'join',
     name: els.nameInput.value || `玩家${Math.floor(Math.random() * 1000)}`,

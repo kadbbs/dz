@@ -204,7 +204,6 @@ private:
     void broadcast_locked(const Room& room, const std::string& text);
     void emit_state_locked(const Room& room);
     void emit_event_locked(const Room& room, std::string message);
-    void forward_rtc_locked(const std::string& from, std::string_view body);
     Player* find_player(Room& room, const std::string& id);
 };
 
@@ -481,8 +480,6 @@ void GameHub::on_message(const std::string& id, const std::string& text) {
         set_sitting_out_locked(id, json_bool(text, "sittingOut", true));
     } else if (type == "transfer") {
         transfer_chips_locked(id, json_string(text, "to").value_or(""), json_int(text, "amount", 0));
-    } else if (type.rfind("rtc-", 0) == 0) {
-        forward_rtc_locked(id, text);
     }
 }
 
@@ -1002,27 +999,6 @@ void GameHub::emit_state_locked(const Room& room) {
 
 void GameHub::emit_event_locked(const Room& room, std::string message) {
     broadcast_locked(room, "{\"type\":\"event\",\"message\":\"" + json_escape(message) + "\"}");
-}
-
-void GameHub::forward_rtc_locked(const std::string& from, std::string_view body) {
-    auto to = json_string(body, "to");
-    if (!to) return;
-
-    auto from_room = session_room_.find(from);
-    auto to_room = session_room_.find(*to);
-    if (from_room == session_room_.end() || to_room == session_room_.end() || from_room->second != to_room->second) {
-        return;
-    }
-
-    std::string payload(body);
-    if (payload.size() > 2 && payload.back() == '}') {
-        payload.pop_back();
-        payload += ",\"from\":\"" + json_escape(from) + "\"}";
-    }
-    auto it = sessions_.find(*to);
-    if (it != sessions_.end()) {
-        if (auto session = it->second.lock()) session->send(payload);
-    }
 }
 
 static std::string mime_type(std::string_view path) {
