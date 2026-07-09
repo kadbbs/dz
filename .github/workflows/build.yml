@@ -64,13 +64,13 @@ jobs:
         run: .\scripts\windows\build_native.ps1 -Configuration Release -BuildDir build-windows
 
       - name: Package
-        run: .\scripts\windows\package_release.ps1 -Configuration Release -BuildDir build-windows -OutputDir dist
+        run: .\scripts\windows\package_release.ps1 -Configuration Release -BuildDir build-windows -OutputDir dist -SkipArchive -MoveNodeModules
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dz-windows-x64
-          path: dist/dz-windows-x64.zip
+          path: dist/dz-windows-x64
           if-no-files-found: error
 
   docker:

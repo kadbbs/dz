@@ -3,7 +3,9 @@ param(
   [string]$Configuration = "Release",
   [string]$BuildDir = "build-windows",
   [string]$OutputDir = "dist",
-  [string]$PackageName = "dz-windows-x64"
+  [string]$PackageName = "dz-windows-x64",
+  [switch]$SkipArchive,
+  [switch]$MoveNodeModules
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,8 +25,11 @@ $staging = Join-Path $outputPath $PackageName
 $archive = Join-Path $outputPath "$PackageName.zip"
 
 Remove-Item -Path @($staging, $archive) -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
+New-Item -ItemType Directory -Force -Path $staging | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $staging "bin") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $staging "mediasoup-server") | Out-Null
+$stagedMediasoup = Join-Path $staging "mediasoup-server"
+New-Item -ItemType Directory -Force -Path $stagedMediasoup | Out-Null
 
 Copy-Item -Path $gameExe -Destination (Join-Path $staging "bin\web_texas_webrtc.exe")
 foreach ($item in @("web", "deploy", "scripts")) {
@@ -34,22 +39,31 @@ foreach ($item in @("README.md", "CMakeLists.txt", "docker-compose.yml")) {
   Copy-Item -Path $item -Destination $staging
 }
 foreach ($item in @("package.json", "package-lock.json", "server.js")) {
-  Copy-Item -Path (Join-Path "mediasoup-server" $item) -Destination (Join-Path $staging "mediasoup-server")
+  Copy-Item -Path (Join-Path "mediasoup-server" $item) -Destination $stagedMediasoup
 }
-Copy-Item -Path $mediaNodeModules -Destination (Join-Path $staging "mediasoup-server\node_modules") -Recurse
+$stagedNodeModules = Join-Path $stagedMediasoup "node_modules"
+if ($MoveNodeModules) {
+  Move-Item -Path $mediaNodeModules -Destination $stagedNodeModules
+} else {
+  Copy-Item -Path $mediaNodeModules -Destination $stagedNodeModules -Recurse
+}
 
-$commit = try {
-  git rev-parse --short HEAD
-} catch {
-  "unknown"
+$commit = git rev-parse --short HEAD 2>$null
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+  $commit = "unknown"
 }
+$builtAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 
 @(
   "package=$PackageName",
   "configuration=$Configuration",
   "commit=$commit",
-  "built_at=$((Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ"))"
+  "built_at=$builtAt"
 ) | Set-Content -Encoding UTF8 (Join-Path $staging "VERSION.txt")
 
-Compress-Archive -Path $staging -DestinationPath $archive -Force
-Write-Host "Created $archive"
+if (-not $SkipArchive) {
+  Compress-Archive -Path $staging -DestinationPath $archive -Force
+  Write-Host "Created $archive"
+} else {
+  Write-Host "Created $staging"
+}
