@@ -49,6 +49,10 @@ jobs:
     defaults:
       run:
         shell: pwsh
+    env:
+      BUILD_DIR: build-windows
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_TRIPLET: x64-windows-static
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -60,8 +64,42 @@ jobs:
           cache: npm
           cache-dependency-path: mediasoup-server/package-lock.json
 
-      - name: Build
-        run: .\scripts\windows\build_native.ps1 -Configuration Release -BuildDir build-windows
+      - name: Bootstrap vcpkg
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"
+
+      - name: Install Windows Boost
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          & "$env:VCPKG_ROOT\vcpkg.exe" install "boost-system:$env:VCPKG_TRIPLET"
+
+      - name: Configure Windows C++
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $toolchain = "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+          $webRoot = (Resolve-Path "web").Path.Replace("\", "/")
+          cmake -S . -B $env:BUILD_DIR -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$toolchain" `
+            -DVCPKG_TARGET_TRIPLET="$env:VCPKG_TRIPLET" `
+            -DWEB_ROOT_PATH="$webRoot"
+
+      - name: Build Windows C++
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake --build $env:BUILD_DIR --config Release
+
+      - name: Install Windows mediasoup deps
+        working-directory: mediasoup-server
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          npm ci --omit=dev
 
       - name: Prepare Windows package dirs
         run: |
