@@ -22,15 +22,21 @@ $outputPath = Resolve-DzPath $OutputDir
 $staging = Join-Path $outputPath $PackageName
 $archive = Join-Path $outputPath "$PackageName.zip"
 
-Remove-Item $staging, $archive -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -Path @($staging, $archive) -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Join-Path $staging "bin") | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $staging "mediasoup-server") | Out-Null
 
-Copy-Item $gameExe (Join-Path $staging "bin\web_texas_webrtc.exe")
-Copy-Item "web", "deploy", "scripts" $staging -Recurse
-Copy-Item "README.md", "CMakeLists.txt", "docker-compose.yml" $staging
-Copy-Item "mediasoup-server\package.json", "mediasoup-server\package-lock.json", "mediasoup-server\server.js" (Join-Path $staging "mediasoup-server")
-Copy-Item $mediaNodeModules (Join-Path $staging "mediasoup-server\node_modules") -Recurse
+Copy-Item -Path $gameExe -Destination (Join-Path $staging "bin\web_texas_webrtc.exe")
+foreach ($item in @("web", "deploy", "scripts")) {
+  Copy-Item -Path $item -Destination $staging -Recurse
+}
+foreach ($item in @("README.md", "CMakeLists.txt", "docker-compose.yml")) {
+  Copy-Item -Path $item -Destination $staging
+}
+foreach ($item in @("package.json", "package-lock.json", "server.js")) {
+  Copy-Item -Path (Join-Path "mediasoup-server" $item) -Destination (Join-Path $staging "mediasoup-server")
+}
+Copy-Item -Path $mediaNodeModules -Destination (Join-Path $staging "mediasoup-server\node_modules") -Recurse
 
 $commit = try {
   git rev-parse --short HEAD
