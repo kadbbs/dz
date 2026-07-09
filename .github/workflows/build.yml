@@ -1,0 +1,84 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-native:
+    name: Linux native package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mediasoup-server/package-lock.json
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libboost-system-dev
+
+      - name: Build
+        run: bash scripts/linux/build_native.sh --configuration Release --build-dir build-linux
+
+      - name: Package
+        run: bash scripts/package_linux.sh --configuration Release --build-dir build-linux --output-dir dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dz-linux-x64
+          path: dist/dz-linux-x64.tar.gz
+          if-no-files-found: error
+
+  windows-native:
+    name: Windows native package
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mediasoup-server/package-lock.json
+
+      - name: Build
+        run: .\scripts\windows\build_native.ps1 -Configuration Release -BuildDir build-windows
+
+      - name: Package
+        run: .\scripts\windows\package_release.ps1 -Configuration Release -BuildDir build-windows -OutputDir dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dz-windows-x64
+          path: dist/dz-windows-x64.zip
+          if-no-files-found: error
+
+  docker:
+    name: Docker Compose build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Build images
+        run: docker compose --env-file deploy/dz.container.env.example build

@@ -1,0 +1,8 @@
+{$DZ_DOMAIN} {
+	encode zstd gzip
+
+	@mediasoup path /mediasoup*
+	reverse_proxy @mediasoup mediasoup:{$MEDIASOUP_SIGNAL_PORT}
+
+	reverse_proxy game:{$DZ_WEB_PORT}
+}

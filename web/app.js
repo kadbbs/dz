@@ -256,6 +256,19 @@ function waitForSocketOpen(socket) {
   });
 }
 
+function resolveMediasoupUrl() {
+  const config = window.DZ_CONFIG || {};
+  if (config.mediasoupUrl && config.mediasoupUrl !== 'auto') return config.mediasoupUrl;
+
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (location.protocol === 'https:') {
+    return `${protocol}//${location.host}${config.mediasoupPath || '/mediasoup'}`;
+  }
+
+  const host = location.hostname.includes(':') ? `[${location.hostname}]` : location.hostname;
+  return `${protocol}//${host}:${config.mediasoupDevPort || 3001}`;
+}
+
 class MediasoupClient {
   constructor(url) {
     this.socket = new WebSocket(url);
@@ -396,7 +409,7 @@ class MediasoupClient {
 
 async function connectMediasoup(gameRoom) {
   if (mediaClient || !myId) return;
-  const mediasoupUrl = window.DZ_CONFIG?.mediasoupUrl;
+  const mediasoupUrl = resolveMediasoupUrl();
   if (!mediasoupUrl) throw new Error('缺少 DZ_CONFIG.mediasoupUrl');
   const player = state.players?.find((item) => item.id === myId);
   mediaClient = new MediasoupClient(mediasoupUrl);

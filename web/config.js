@@ -1,4 +1,9 @@
 window.DZ_CONFIG = {
-  // mediasoup 信令服务地址。生产环境必须使用 wss://。
-  mediasoupUrl: 'ws://localhost:3001',
+  // "auto" means:
+  // - local HTTP development: ws://<current-host>:3001
+  // - HTTPS deployment: wss://<current-host>/mediasoup
+  // Set a full URL here when using a separate media domain, e.g. wss://media.example.com.
+  mediasoupUrl: 'auto',
+  mediasoupPath: '/mediasoup',
+  mediasoupDevPort: 3001,
 };

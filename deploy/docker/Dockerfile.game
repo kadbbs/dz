@@ -1,0 +1,35 @@
+FROM ubuntu:24.04 AS build
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    libboost-system-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY CMakeLists.txt ./
+COPY src ./src
+COPY web ./web
+
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWEB_ROOT_PATH=/app/web \
+  && cmake --build build -j"$(nproc)"
+
+FROM ubuntu:24.04 AS runtime
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates libboost-system-dev \
+  && rm -rf /var/lib/apt/lists/* \
+  && useradd --system --home /app --shell /usr/sbin/nologin dz
+
+WORKDIR /app
+COPY --from=build /src/build/web_texas_webrtc /app/web_texas_webrtc
+COPY web /app/web
+RUN chown -R dz:dz /app
+
+USER dz
+EXPOSE 8080
+ENV DZ_LISTEN_HOST=::
+ENV DZ_WEB_PORT=8080
+CMD ["/app/web_texas_webrtc"]

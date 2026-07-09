@@ -27,7 +27,7 @@ sudo apt-get install -y build-essential cmake libboost-system-dev
 ```bash
 cmake -S . -B build
 cmake --build build -j
-./build/web_texas_webrtc 0.0.0.0 8080
+./build/web_texas_webrtc :: 8080
 ```
 
 打开：
@@ -60,9 +60,11 @@ MEDIASOUP_MAX_PORT=49999
 
 ```js
 window.DZ_CONFIG = {
-  mediasoupUrl: 'ws://localhost:3001',
+  mediasoupUrl: 'auto',
 };
 ```
+
+`auto` 会在本地 HTTP 开发时连接 `ws://<当前主机>:3001`，在 HTTPS 公网部署时连接同域名下的 `wss://<当前主机>/mediasoup`。
 
 ## 业务逻辑
 
@@ -252,17 +254,204 @@ C++ 服务端不处理音视频编码、解码和转发，只负责牌局状态�
 
 ## 部署
 
+### 多平台部署选择
+
+当前提供三种部署路径：
+
+- Linux 原生/systemd：最适合公网 IPv6 生产机，脚本会安装依赖、编译 C++、配置 Caddy 和 systemd。
+- Docker Compose：适合 Linux x86_64、Linux ARM64、Windows Docker Desktop/WSL2、macOS 测试环境；同一套 Compose 编排 C++、mediasoup 和 Caddy。
+- Windows 原生：适合必须直接跑在 Windows Server 的场景，需要 Visual Studio/MSVC、CMake、Node.js 22+ 和 Caddy。
+
+mediasoup v3 支持 Windows，但 Windows 原生安装需要 MSVC 编译环境；如果只是要快速跨平台上线，优先用 Docker Compose。
+
+### GitHub Actions 构建产物
+
+仓库包含 `.github/workflows/build.yml`。push 到 GitHub 后会自动构建：
+
+- `dz-linux-x64.tar.gz`: Ubuntu 24.04 x64 原生运行包，包含 C++ 服务、Web 静态文件、mediasoup 服务和已安装的 Node 依赖。
+- `dz-windows-x64.zip`: Windows Server 2022 x64 原生运行包，包含 C++ exe、Web 静态文件、mediasoup 服务和已安装的 Node 依赖。
+- Docker Compose build 校验：验证 `deploy/docker/Dockerfile.game` 和 `deploy/docker/Dockerfile.mediasoup` 都能构建。
+
+Linux artifact 解压后可先本地试跑：
+
+```bash
+tar -xzf dz-linux-x64.tar.gz
+cd dz-linux-x64
+cp deploy/dz.env.example deploy/dz.env
+editor deploy/dz.env
+./scripts/linux/run_native.sh deploy/dz.env
+```
+
+Windows artifact 解压后：
+
+```powershell
+Expand-Archive dz-windows-x64.zip
+cd dz-windows-x64
+Copy-Item deploy/windows/dz.windows.env.example deploy/windows/dz.windows.env
+notepad deploy/windows/dz.windows.env
+pwsh scripts/windows/run_native.ps1
+```
+
+两个原生包仍需要目标机器安装对应运行环境：Linux 需要 Node.js 22+ 和系统 C++/Boost 运行库；Windows 需要 Node.js 22+，公网 HTTPS 入口还需要 Caddy。生产部署前请把环境文件里的 `DZ_DOMAIN` 和 `MEDIASOUP_ANNOUNCED_IP` 改成真实域名和公网地址。
+
+### Docker Compose 跨平台部署
+
+准备环境文件：
+
+```bash
+cp deploy/dz.container.env.example deploy/dz.container.env
+editor deploy/dz.container.env
+```
+
+至少改：
+
+```text
+DZ_DOMAIN=dz.example.com
+MEDIASOUP_ANNOUNCED_IP=2001:db8::10
+```
+
+容器示例默认发布 `40000-40100/udp,tcp`，适合小桌和测试；如果要承载更多并发，在 `deploy/dz.container.env` 里扩大 `MEDIASOUP_MAX_PORT`，并同步放行防火墙。
+
+启动：
+
+```bash
+docker compose --env-file deploy/dz.container.env up -d --build
+```
+
+查看状态：
+
+```bash
+docker compose --env-file deploy/dz.container.env ps
+docker compose --env-file deploy/dz.container.env logs -f
+```
+
+跨架构构建镜像示例：
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f deploy/docker/Dockerfile.game -t your-registry/dz-game:latest --push .
+
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f deploy/docker/Dockerfile.mediasoup -t your-registry/dz-mediasoup:latest --push .
+```
+
+Windows 上推荐使用 Docker Desktop 的 Linux containers 模式运行同一条 `docker compose` 命令。公网部署仍然需要域名 AAAA 记录、80/443 端口和 mediasoup 媒体端口。
+
+### Windows 原生部署
+
+前置环境：
+
+- Windows Server 2022/Windows 11。
+- Visual Studio 2022 Build Tools，安装 MSVC C++ 工具链。
+- CMake、Git、Node.js 22+。
+- Caddy，用于 HTTPS/WSS。
+- PowerShell 7 或 Windows PowerShell。
+
+构建 C++ 服务并安装 mediasoup 依赖：
+
+```powershell
+pwsh scripts/windows/build_native.ps1
+```
+
+脚本会自动准备 vcpkg，并默认用 `x64-windows-static` triplet 安装 `boost-system`，让 C++ exe 更适合打包分发。如果 `npm ci` 编译 mediasoup 时报 MSVC 相关错误，请从 “x64 Native Tools Command Prompt for VS 2022” 或 “Developer PowerShell for VS 2022” 重新执行。
+
+准备 Windows 环境文件：
+
+```powershell
+Copy-Item deploy/windows/dz.windows.env.example deploy/windows/dz.windows.env
+notepad deploy/windows/dz.windows.env
+```
+
+至少改：
+
+```text
+DZ_DOMAIN=dz.example.com
+MEDIASOUP_ANNOUNCED_IP=2001:db8::10
+```
+
+以管理员 PowerShell 打开防火墙端口：
+
+```powershell
+pwsh scripts/windows/open_firewall.ps1
+```
+
+运行服务：
+
+```powershell
+pwsh scripts/windows/run_native.ps1
+```
+
+这个脚本会启动 C++ 牌局服务、mediasoup 和 Caddy。生产环境请用真实域名访问 `https://DZ_DOMAIN`；本机调试可以加 `-NoCaddy` 后用 `http://localhost:8080`。
+
+如果要注册为开机自启任务，以管理员 PowerShell 执行：
+
+```powershell
+pwsh scripts/windows/install_startup_tasks.ps1
+Start-ScheduledTask -TaskName "DZ Game"
+Start-ScheduledTask -TaskName "DZ Mediasoup"
+Start-ScheduledTask -TaskName "DZ Caddy"
+```
+
+### Linux 原生公网 IPv6 快速部署
+
+推荐用一个带 AAAA 记录的域名访问公网 IPv6 服务器，例如：
+
+```text
+dz.example.com AAAA 2001:db8::10
+```
+
+浏览器摄像头/麦克风需要安全上下文，所以生产环境不要只裸跑 `http://[IPv6]:8080`；用 Caddy 自动签 HTTPS 证书最省事。
+
+仓库已经提供部署模板：
+
+```text
+deploy/dz.env.example                 # Linux 原生生产环境变量
+deploy/dz.container.env.example       # Docker Compose 环境变量
+deploy/windows/dz.windows.env.example # Windows 原生环境变量
+deploy/systemd/dz-game.service        # Linux C++ 牌局服务
+deploy/systemd/dz-mediasoup.service   # Linux mediasoup 服务
+deploy/docker/Dockerfile.game         # C++ 服务容器镜像
+deploy/docker/Dockerfile.mediasoup    # mediasoup 容器镜像
+deploy/caddy/Caddyfile                # Linux 原生 HTTPS + /mediasoup WSS 反代
+deploy/caddy/Caddyfile.docker         # Docker Compose Caddy 配置
+deploy/caddy/Caddyfile.windows        # Windows 原生 Caddy 配置
+scripts/install_ipv6_host.sh          # Ubuntu/Debian 原生安装脚本
+scripts/windows/*.ps1                 # Windows 原生构建/运行/防火墙脚本
+```
+
+在服务器上执行：
+
+```bash
+sudo bash scripts/install_ipv6_host.sh
+sudo editor /etc/dz/dz.env
+sudo systemctl restart dz-game dz-mediasoup caddy
+```
+
+至少要改这两项：
+
+```text
+DZ_DOMAIN=dz.example.com
+MEDIASOUP_ANNOUNCED_IP=2001:db8::10
+```
+
+防火墙放行：
+
+- `80/tcp`、`443/tcp`: Caddy HTTPS 和证书签发。
+- `40000-49999/udp,tcp`: mediasoup WebRTC 媒体端口。
+
+脚本默认让 C++ 服务监听 `[::1]:8080`，mediasoup 信令监听 `[::1]:3001`，公网入口只暴露 Caddy；WebRTC 媒体端口由 mediasoup 直接对外监听 `::` 并通过 `MEDIASOUP_ANNOUNCED_IP` 告诉浏览器公网 IPv6 地址。
+
 ### 需要的东西
 
 - 一台公网服务器。
-- 两个域名或子域名：
-  - `dz.example.com`: 牌局 Web 服务。
-  - `media.example.com`: mediasoup 信令/SFU 服务。
+- 一个带 AAAA 记录的域名即可：
+  - `dz.example.com`: 牌局 Web 服务和 `/mediasoup` WSS 反代。
+  - 如果要拆分，也可以额外准备 `media.example.com` 给 mediasoup 信令/SFU。
 - Node.js 22+，用于部署 mediasoup 服务。
 - Caddy 或 Nginx，用于 HTTPS/WSS。
 - 开放防火墙端口：
   - `80/tcp`、`443/tcp`: HTTPS 和证书签发。
-  - `3001/tcp`: mediasoup 信令服务，生产环境通常由反向代理转成 WSS。
+  - `3001/tcp`: mediasoup 信令服务；默认只监听本机 `[::1]`，不需要对公网开放。
   - `40000-49999/udp,tcp`: mediasoup WebRTC 媒体端口。
   - 如果单独配置 TURN，还需要对应 TURN 端口，例如 `3478/udp`、`3478/tcp`、`5349/tcp`。
 
@@ -277,7 +466,7 @@ Caddy/Nginx -> C++ dz service :8080
 Browser
   | WSS/WebRTC/TURN
   v
-mediasoup Node service
+mediasoup SFU service
 ```
 
 牌局和音视频分开部署：
@@ -291,21 +480,24 @@ mediasoup Node service
 
 ```caddyfile
 dz.example.com {
-  reverse_proxy 127.0.0.1:8080
+  @mediasoup path /mediasoup*
+  reverse_proxy @mediasoup [::1]:3001
+
+  reverse_proxy [::1]:8080
 }
 ```
 
 启动 C++ 服务：
 
 ```bash
-./build/web_texas_webrtc 127.0.0.1 8080
+./build/web_texas_webrtc ::1 8080
 ```
 
 前端配置：
 
 ```js
 window.DZ_CONFIG = {
-  mediasoupUrl: 'wss://media.example.com',
+  mediasoupUrl: 'auto',
 };
 ```
 
@@ -324,8 +516,10 @@ npm start
 ```bash
 cd mediasoup-server
 MEDIASOUP_SIGNAL_PORT=3001 \
-MEDIASOUP_LISTEN_IP=0.0.0.0 \
-MEDIASOUP_ANNOUNCED_IP=<服务器公网 IP> \
+MEDIASOUP_SIGNAL_HOST=::1 \
+MEDIASOUP_LISTEN_IP=:: \
+MEDIASOUP_ANNOUNCED_IP=<服务器公网 IPv6，不加方括号> \
+MEDIASOUP_PREFER_IPV6=true \
 MEDIASOUP_MIN_PORT=40000 \
 MEDIASOUP_MAX_PORT=49999 \
 npm start
@@ -334,7 +528,7 @@ npm start
 生产注意点：
 
 - `MEDIASOUP_ANNOUNCED_IP` 必须是浏览器可访问的公网 IP 或正确的外网地址。
-- `web/config.js` 的 `mediasoupUrl` 必须是公网可访问的 `wss://` 地址。
+- `web/config.js` 的 `mediasoupUrl` 保持 `auto` 时，HTTPS 下默认使用同域名的 `wss://.../mediasoup`；如果拆出独立媒体域名，就改成公网可访问的完整 `wss://` 地址。
 - 手机浏览器必须通过 `https://dz.example.com` 访问牌局页面，否则摄像头/麦克风会被浏览器拒绝。
 - mediasoup 的媒体端口必须对公网开放，否则需要依赖 TURN。
 - 如果玩家在复杂 NAT、公司网络或移动网络下，TURN/TLS 是稳定性的关键。

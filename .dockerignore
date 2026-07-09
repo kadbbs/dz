@@ -1,0 +1,10 @@
+.git
+build
+build-*
+node_modules
+mediasoup-server/node_modules
+npm-debug.log
+.DS_Store
+deploy/dz.env
+deploy/dz.container.env
+*.log

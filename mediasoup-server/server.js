@@ -1,11 +1,14 @@
+import { createServer } from 'node:http';
 import os from 'node:os';
 import process from 'node:process';
 import WebSocket, { WebSocketServer } from 'ws';
 import * as mediasoup from 'mediasoup';
 
 const port = Number(process.env.MEDIASOUP_SIGNAL_PORT || 3001);
+const signalHost = process.env.MEDIASOUP_SIGNAL_HOST || undefined;
 const listenIp = process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0';
-const announcedIp = process.env.MEDIASOUP_ANNOUNCED_IP || firstNonInternalIp();
+const preferIpv6 = boolEnv(process.env.MEDIASOUP_PREFER_IPV6) ?? listenIp.includes(':');
+const announcedIp = process.env.MEDIASOUP_ANNOUNCED_IP || firstNonInternalIp({ preferIpv6 });
 const rtcMinPort = Number(process.env.MEDIASOUP_MIN_PORT || 40000);
 const rtcMaxPort = Number(process.env.MEDIASOUP_MAX_PORT || 49999);
 
@@ -36,7 +39,17 @@ worker.on('died', () => {
 });
 
 const rooms = new Map();
-const wss = new WebSocketServer({ port });
+const server = createServer((req, res) => {
+  if (req.url === '/healthz') {
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end('ok\n');
+    return;
+  }
+
+  res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end('not found\n');
+});
+const wss = new WebSocketServer({ server });
 
 wss.on('connection', (socket) => {
   const peer = {
@@ -67,8 +80,11 @@ wss.on('connection', (socket) => {
   socket.on('close', () => closePeer(peer));
 });
 
-console.log(`mediasoup signaling listening on ws://0.0.0.0:${port}`);
-console.log(`WebRTC listenIp=${listenIp} announcedIp=${announcedIp || '(none)'} ports=${rtcMinPort}-${rtcMaxPort}`);
+const listenOptions = signalHost ? { host: signalHost, port } : { port };
+server.listen(listenOptions, () => {
+  console.log(`mediasoup signaling listening on ws://${formatHost(signalHost || '::')}:${port}`);
+  console.log(`WebRTC listenIp=${listenIp} announcedIp=${announcedIp || '(none)'} ports=${rtcMinPort}-${rtcMaxPort}`);
+});
 
 async function handleRequest(peer, action, data) {
   switch (action) {
@@ -240,11 +256,39 @@ function send(socket, message) {
   }
 }
 
-function firstNonInternalIp() {
+function boolEnv(value) {
+  if (value === undefined) return undefined;
+  if (/^(1|true|yes|on)$/i.test(value)) return true;
+  if (/^(0|false|no|off)$/i.test(value)) return false;
+  return undefined;
+}
+
+function firstNonInternalIp({ preferIpv6 = false } = {}) {
+  const candidates = [];
   for (const items of Object.values(os.networkInterfaces())) {
     for (const item of items || []) {
-      if (item.family === 'IPv4' && !item.internal) return item.address;
+      if (item.internal) continue;
+      if (item.family === 'IPv6' && isUsableIpv6(item.address)) {
+        candidates.push({ family: 'IPv6', address: item.address });
+      }
+      if (item.family === 'IPv4') {
+        candidates.push({ family: 'IPv4', address: item.address });
+      }
     }
   }
-  return undefined;
+  const preferred = preferIpv6 ? 'IPv6' : 'IPv4';
+  return candidates.find((item) => item.family === preferred)?.address
+    || candidates.find((item) => item.family !== preferred)?.address;
+}
+
+function isUsableIpv6(address) {
+  const normalized = address.toLowerCase();
+  return !normalized.startsWith('fe80:')
+    && !normalized.startsWith('fc')
+    && !normalized.startsWith('fd')
+    && normalized !== '::1';
+}
+
+function formatHost(host) {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
 }

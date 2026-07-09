@@ -8,6 +8,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -39,6 +40,16 @@ static std::string web_root() {
 #else
     return "./web";
 #endif
+}
+
+static std::string env_or_default(const char* name, std::string fallback) {
+    const char* value = std::getenv(name);
+    return value && *value ? value : std::move(fallback);
+}
+
+static std::string endpoint_host_text(const asio::ip::address& address) {
+    if (address.is_v6()) return "[" + address.to_string() + "]";
+    return address.to_string();
 }
 
 static std::string json_escape(std::string_view input) {
@@ -1060,6 +1071,11 @@ private:
         }
 
         std::string target(req_.target());
+        if (target == "/healthz") {
+            write(make_string_response(http::status::ok, "ok\n", req_.version(), req_.keep_alive()));
+            return;
+        }
+
         if (target.empty() || target == "/") target = "/index.html";
         if (target.find("..") != std::string::npos) {
             write(make_string_response(http::status::bad_request, "Bad request", req_.version(), req_.keep_alive()));
@@ -1094,6 +1110,10 @@ public:
         beast::error_code ec;
         acceptor_.open(endpoint.protocol(), ec);
         if (ec) throw beast::system_error(ec);
+        if (endpoint.protocol() == tcp::v6()) {
+            beast::error_code v6_ec;
+            acceptor_.set_option(asio::ip::v6_only(false), v6_ec);
+        }
         acceptor_.set_option(asio::socket_base::reuse_address(true), ec);
         if (ec) throw beast::system_error(ec);
         acceptor_.bind(endpoint, ec);
@@ -1121,8 +1141,10 @@ private:
 
 int main(int argc, char* argv[]) {
     try {
-        const auto address = asio::ip::make_address(argc > 1 ? argv[1] : "0.0.0.0");
-        const unsigned short port = static_cast<unsigned short>(argc > 2 ? std::stoi(argv[2]) : 8080);
+        const auto listen_host = argc > 1 ? std::string(argv[1]) : env_or_default("DZ_LISTEN_HOST", "::");
+        const auto listen_port = argc > 2 ? std::string(argv[2]) : env_or_default("DZ_WEB_PORT", "8080");
+        const auto address = asio::ip::make_address(listen_host);
+        const unsigned short port = static_cast<unsigned short>(std::stoi(listen_port));
         const int threads = std::max(1u, std::thread::hardware_concurrency());
 
         asio::io_context ioc{threads};
@@ -1133,7 +1155,7 @@ int main(int argc, char* argv[]) {
         pool.reserve(threads - 1);
         for (int i = 1; i < threads; ++i) pool.emplace_back([&] { ioc.run(); });
 
-        std::cout << "Serving http://" << address.to_string() << ":" << port << "\n";
+        std::cout << "Serving http://" << endpoint_host_text(address) << ":" << port << "\n";
         ioc.run();
         for (auto& t : pool) t.join();
     } catch (const std::exception& e) {
