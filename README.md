@@ -254,22 +254,18 @@ C++ 服务端不处理音视频编码、解码和转发，只负责牌局状态�
 
 ## 部署
 
-### 多平台部署选择
+### 部署选择
 
-当前提供三种部署路径：
+当前提供两种部署路径：
 
 - Linux 原生/systemd：最适合公网 IPv6 生产机，脚本会安装依赖、编译 C++、配置 Caddy 和 systemd。
-- Docker Compose：适合 Linux x86_64、Linux ARM64、Windows Docker Desktop/WSL2、macOS 测试环境；同一套 Compose 编排 C++、mediasoup 和 Caddy。
-- Windows 原生：适合必须直接跑在 Windows Server 的场景，需要 Visual Studio/MSVC、CMake、Node.js 22+ 和 Caddy。
-
-mediasoup v3 支持 Windows，但 Windows 原生安装需要 MSVC 编译环境；如果只是要快速跨平台上线，优先用 Docker Compose。
+- Docker Compose：适合 Linux x86_64、Linux ARM64、macOS 测试环境；同一套 Compose 编排 C++、mediasoup 和 Caddy。
 
 ### GitHub Actions 构建产物
 
 仓库包含 `.github/workflows/build.yml`。push 到 GitHub 后会自动构建：
 
 - `dz-linux-x64.tar.gz`: Ubuntu 24.04 x64 原生运行包，包含 C++ 服务、Web 静态文件、mediasoup 服务和已安装的 Node 依赖。
-- `dz-windows-x64.zip`: Windows Server 2022 x64 原生运行包，包含 C++ exe、Web 静态文件、mediasoup 服务和已安装的 Node 依赖。
 - Docker Compose build 校验：验证 `deploy/docker/Dockerfile.game` 和 `deploy/docker/Dockerfile.mediasoup` 都能构建。
 
 Linux artifact 解压后可先本地试跑：
@@ -282,19 +278,9 @@ editor deploy/dz.env
 ./scripts/linux/run_native.sh deploy/dz.env
 ```
 
-Windows artifact 解压后：
+原生包仍需要目标机器安装对应运行环境：Node.js 22+ 和系统 C++/Boost 运行库；公网 HTTPS 入口还需要 Caddy。生产部署前请把环境文件里的 `DZ_DOMAIN` 和 `MEDIASOUP_ANNOUNCED_IP` 改成真实域名和公网地址。
 
-```powershell
-Expand-Archive dz-windows-x64.zip
-cd dz-windows-x64
-Copy-Item deploy/windows/dz.windows.env.example deploy/windows/dz.windows.env
-notepad deploy/windows/dz.windows.env
-pwsh scripts/windows/run_native.ps1
-```
-
-两个原生包仍需要目标机器安装对应运行环境：Linux 需要 Node.js 22+ 和系统 C++/Boost 运行库；Windows 需要 Node.js 22+，公网 HTTPS 入口还需要 Caddy。生产部署前请把环境文件里的 `DZ_DOMAIN` 和 `MEDIASOUP_ANNOUNCED_IP` 改成真实域名和公网地址。
-
-### Docker Compose 跨平台部署
+### Docker Compose 部署
 
 准备环境文件：
 
@@ -335,62 +321,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
   -f deploy/docker/Dockerfile.mediasoup -t your-registry/dz-mediasoup:latest --push .
 ```
 
-Windows 上推荐使用 Docker Desktop 的 Linux containers 模式运行同一条 `docker compose` 命令。公网部署仍然需要域名 AAAA 记录、80/443 端口和 mediasoup 媒体端口。
-
-### Windows 原生部署
-
-前置环境：
-
-- Windows Server 2022/Windows 11。
-- Visual Studio 2022 Build Tools，安装 MSVC C++ 工具链。
-- CMake、Git、Node.js 22+。
-- Caddy，用于 HTTPS/WSS。
-- PowerShell 7 或 Windows PowerShell。
-
-构建 C++ 服务并安装 mediasoup 依赖：
-
-```powershell
-pwsh scripts/windows/build_native.ps1
-```
-
-脚本会自动准备 vcpkg，并默认用 `x64-windows-static` triplet 安装 `boost-system`，让 C++ exe 更适合打包分发。如果 `npm ci` 编译 mediasoup 时报 MSVC 相关错误，请从 “x64 Native Tools Command Prompt for VS 2022” 或 “Developer PowerShell for VS 2022” 重新执行。
-
-准备 Windows 环境文件：
-
-```powershell
-Copy-Item deploy/windows/dz.windows.env.example deploy/windows/dz.windows.env
-notepad deploy/windows/dz.windows.env
-```
-
-至少改：
-
-```text
-DZ_DOMAIN=dz.example.com
-MEDIASOUP_ANNOUNCED_IP=2001:db8::10
-```
-
-以管理员 PowerShell 打开防火墙端口：
-
-```powershell
-pwsh scripts/windows/open_firewall.ps1
-```
-
-运行服务：
-
-```powershell
-pwsh scripts/windows/run_native.ps1
-```
-
-这个脚本会启动 C++ 牌局服务、mediasoup 和 Caddy。生产环境请用真实域名访问 `https://DZ_DOMAIN`；本机调试可以加 `-NoCaddy` 后用 `http://localhost:8080`。
-
-如果要注册为开机自启任务，以管理员 PowerShell 执行：
-
-```powershell
-pwsh scripts/windows/install_startup_tasks.ps1
-Start-ScheduledTask -TaskName "DZ Game"
-Start-ScheduledTask -TaskName "DZ Mediasoup"
-Start-ScheduledTask -TaskName "DZ Caddy"
-```
+公网部署仍然需要域名 AAAA 记录、80/443 端口和 mediasoup 媒体端口。
 
 ### Linux 原生公网 IPv6 快速部署
 
@@ -407,16 +338,13 @@ dz.example.com AAAA 2001:db8::10
 ```text
 deploy/dz.env.example                 # Linux 原生生产环境变量
 deploy/dz.container.env.example       # Docker Compose 环境变量
-deploy/windows/dz.windows.env.example # Windows 原生环境变量
 deploy/systemd/dz-game.service        # Linux C++ 牌局服务
 deploy/systemd/dz-mediasoup.service   # Linux mediasoup 服务
 deploy/docker/Dockerfile.game         # C++ 服务容器镜像
 deploy/docker/Dockerfile.mediasoup    # mediasoup 容器镜像
 deploy/caddy/Caddyfile                # Linux 原生 HTTPS + /mediasoup WSS 反代
 deploy/caddy/Caddyfile.docker         # Docker Compose Caddy 配置
-deploy/caddy/Caddyfile.windows        # Windows 原生 Caddy 配置
 scripts/install_ipv6_host.sh          # Ubuntu/Debian 原生安装脚本
-scripts/windows/*.ps1                 # Windows 原生构建/运行/防火墙脚本
 ```
 
 在服务器上执行：

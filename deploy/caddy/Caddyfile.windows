@@ -1,8 +1,0 @@
-{$DZ_DOMAIN} {
-	encode zstd gzip
-
-	@mediasoup path /mediasoup*
-	reverse_proxy @mediasoup [::1]:{$MEDIASOUP_SIGNAL_PORT}
-
-	reverse_proxy [::1]:{$DZ_WEB_PORT}
-}
