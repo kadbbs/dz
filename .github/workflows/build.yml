@@ -63,18 +63,30 @@ jobs:
       - name: Build
         run: .\scripts\windows\build_native.ps1 -Configuration Release -BuildDir build-windows
 
-      - name: Stage Windows app files
+      - name: Prepare Windows package dirs
         run: |
           $packageDir = "dist\dz-windows-x64"
           New-Item -ItemType Directory -Force -Path "$packageDir\bin" | Out-Null
           New-Item -ItemType Directory -Force -Path "$packageDir\mediasoup-server" | Out-Null
+
+      - name: Copy Windows game executable
+        run: |
+          $packageDir = "dist\dz-windows-x64"
           Copy-Item -Path "build-windows\Release\web_texas_webrtc.exe" -Destination "$packageDir\bin\web_texas_webrtc.exe"
+
+      - name: Copy Windows app assets
+        run: |
+          $packageDir = "dist\dz-windows-x64"
           foreach ($item in @("web", "deploy", "scripts")) {
             Copy-Item -Path $item -Destination $packageDir -Recurse
           }
           foreach ($item in @("README.md", "CMakeLists.txt", "docker-compose.yml")) {
             Copy-Item -Path $item -Destination $packageDir
           }
+
+      - name: Copy Windows mediasoup descriptors
+        run: |
+          $packageDir = "dist\dz-windows-x64"
           foreach ($item in @("package.json", "package-lock.json", "server.js")) {
             Copy-Item -Path "mediasoup-server\$item" -Destination "$packageDir\mediasoup-server"
           }
