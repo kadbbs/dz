@@ -63,8 +63,35 @@ jobs:
       - name: Build
         run: .\scripts\windows\build_native.ps1 -Configuration Release -BuildDir build-windows
 
-      - name: Package
-        run: .\scripts\windows\package_release.ps1 -Configuration Release -BuildDir build-windows -OutputDir dist -SkipArchive -MoveNodeModules
+      - name: Stage Windows app files
+        run: |
+          $packageDir = "dist\dz-windows-x64"
+          New-Item -ItemType Directory -Force -Path "$packageDir\bin" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$packageDir\mediasoup-server" | Out-Null
+          Copy-Item -Path "build-windows\Release\web_texas_webrtc.exe" -Destination "$packageDir\bin\web_texas_webrtc.exe"
+          foreach ($item in @("web", "deploy", "scripts")) {
+            Copy-Item -Path $item -Destination $packageDir -Recurse
+          }
+          foreach ($item in @("README.md", "CMakeLists.txt", "docker-compose.yml")) {
+            Copy-Item -Path $item -Destination $packageDir
+          }
+          foreach ($item in @("package.json", "package-lock.json", "server.js")) {
+            Copy-Item -Path "mediasoup-server\$item" -Destination "$packageDir\mediasoup-server"
+          }
+
+      - name: Stage Windows node modules
+        run: Move-Item -Path "mediasoup-server\node_modules" -Destination "dist\dz-windows-x64\mediasoup-server\node_modules"
+
+      - name: Write Windows package metadata
+        run: |
+          $commit = git rev-parse --short HEAD
+          $builtAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+          @(
+            "package=dz-windows-x64",
+            "configuration=Release",
+            "commit=$commit",
+            "built_at=$builtAt"
+          ) | Set-Content -Encoding UTF8 "dist\dz-windows-x64\VERSION.txt"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
