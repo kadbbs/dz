@@ -54,5 +54,13 @@ function Resolve-DzGameExe {
     }
   }
 
+  if (Test-Path $buildPath) {
+    $found = Get-ChildItem -Path $buildPath -Recurse -Filter "web_texas_webrtc.exe" -File |
+      Select-Object -First 1
+    if ($found) {
+      return $found.FullName
+    }
+  }
+
   throw "Missing web_texas_webrtc.exe. Run scripts/windows/build_native.ps1 first, or use a packaged release with bin\web_texas_webrtc.exe."
 }

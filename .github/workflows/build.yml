@@ -72,7 +72,11 @@ jobs:
       - name: Copy Windows game executable
         run: |
           $packageDir = "dist\dz-windows-x64"
-          Copy-Item -Path "build-windows\Release\web_texas_webrtc.exe" -Destination "$packageDir\bin\web_texas_webrtc.exe"
+          $gameExe = Get-ChildItem -Path "build-windows" -Recurse -Filter "web_texas_webrtc.exe" -File | Select-Object -First 1
+          if (-not $gameExe) {
+            throw "Could not find web_texas_webrtc.exe under build-windows"
+          }
+          Copy-Item -Path $gameExe.FullName -Destination "$packageDir\bin\web_texas_webrtc.exe"
 
       - name: Copy Windows app assets
         run: |

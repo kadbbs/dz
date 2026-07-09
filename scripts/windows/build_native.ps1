@@ -57,4 +57,9 @@ if (-not $SkipMediasoupInstall) {
   }
 }
 
-Write-Host "Windows native build finished: $BuildDir\$Configuration\web_texas_webrtc.exe"
+$builtExe = Get-ChildItem -Path $BuildDir -Recurse -Filter "web_texas_webrtc.exe" -File |
+  Select-Object -First 1
+if (-not $builtExe) {
+  throw "Build finished but web_texas_webrtc.exe was not found under $BuildDir."
+}
+Write-Host "Windows native build finished: $($builtExe.FullName)"
