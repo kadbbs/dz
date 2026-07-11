@@ -33,6 +33,9 @@ jobs:
       - name: Build
         run: bash scripts/linux/build_native.sh --configuration Release --build-dir build-linux
 
+      - name: Test game logic
+        run: ctest --test-dir build-linux --output-on-failure
+
       - name: Package
         run: bash scripts/package_linux.sh --configuration Release --build-dir build-linux --output-dir dist
 
@@ -42,13 +45,3 @@ jobs:
           name: dz-linux-x64
           path: dist/dz-linux-x64.tar.gz
           if-no-files-found: error
-
-  docker:
-    name: Docker Compose build
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out
-        uses: actions/checkout@v4
-
-      - name: Build images
-        run: docker compose --env-file deploy/dz.container.env.example build

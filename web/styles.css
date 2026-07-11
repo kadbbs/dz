@@ -14,6 +14,118 @@ body {
   min-height: 100vh;
 }
 
+[hidden] {
+  display: none !important;
+}
+
+.login-screen {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  background: #fff;
+  color: #111;
+}
+
+.login-card {
+  display: grid;
+  width: min(280px, calc(100vw - 40px));
+  gap: 12px;
+}
+
+.login-card h1 {
+  color: #111;
+  text-align: center;
+}
+
+.login-card .login-description {
+  color: #555;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.login-card input {
+  border: 1px solid #bbb;
+  background: #fff;
+  color: #111;
+  text-align: center;
+  letter-spacing: 0.18em;
+}
+
+.login-card button {
+  border-color: #111;
+  background: #111;
+  color: #fff;
+}
+
+.login-card p {
+  min-height: 20px;
+  color: #666;
+  text-align: center;
+  font-size: 13px;
+}
+
+.lobby-screen {
+  min-height: 100vh;
+  padding: 48px 24px;
+  background: #f7f7f5;
+  color: #171817;
+}
+
+.lobby-shell {
+  width: min(900px, 100%);
+  margin: 0 auto;
+}
+
+.lobby-heading {
+  margin-bottom: 28px;
+}
+
+.lobby-heading h1 {
+  color: #171817;
+}
+
+.lobby-heading p {
+  margin-top: 8px;
+  color: #6a6d6b;
+}
+
+.game-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+}
+
+.game-tile {
+  display: grid;
+  min-height: 180px;
+  padding: 24px;
+  border: 1px solid #dedfdb;
+  border-radius: 12px;
+  background: #fff;
+  color: #171817;
+  text-align: left;
+  align-content: space-between;
+  box-shadow: 0 8px 24px rgb(20 25 22 / 7%);
+}
+
+.game-tile strong {
+  font-size: 22px;
+}
+
+.game-tile span {
+  color: #6a6d6b;
+  font-weight: 400;
+}
+
+.game-tile em {
+  color: #176b50;
+  font-style: normal;
+}
+
+.game-tile.coming-soon {
+  opacity: 0.6;
+}
+
 button,
 input,
 select {
@@ -87,6 +199,18 @@ select:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.secondary-button {
+  border: 1px solid #67746f;
+  background: transparent;
+  color: #edf3ef;
 }
 
 h1,
@@ -344,6 +468,7 @@ video {
   }
 
   .topbar,
+  .topbar-actions,
   .join,
   .mode-row,
   .transfer {
@@ -353,5 +478,139 @@ video {
 
   .topbar {
     display: grid;
+  }
+
+  .topbar-actions {
+    display: grid;
+  }
+}
+
+/* Game and room lobby */
+.lobby-heading-row,
+.room-browser .panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.light-button {
+  border: 1px solid #c8cac6;
+  background: #fff;
+  color: #252725;
+}
+
+.room-entry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.room-entry-card,
+.room-browser,
+.rules-summary {
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  border: 1px solid #dedfdb;
+  border-radius: 12px;
+  background: #fff;
+  color: #171817;
+}
+
+.room-entry-card input {
+  border-color: #c8cac6;
+  background: #fff;
+  color: #171817;
+}
+
+.room-browser,
+.rules-summary {
+  margin-top: 18px;
+}
+
+.room-list {
+  display: grid;
+  gap: 8px;
+}
+
+.room-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #e2e3df;
+  border-radius: 8px;
+}
+
+.room-row button {
+  min-height: 34px;
+}
+
+.room-empty {
+  color: #777;
+  text-align: center;
+  padding: 18px;
+}
+
+.meta {
+  text-align: center;
+}
+
+#turnNotice,
+#turnTimer {
+  display: block;
+}
+
+#turnNotice {
+  color: #ffe19b;
+}
+
+#turnTimer {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.side-pots,
+.quick-raises,
+.player-badges,
+.revealed-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.side-pots {
+  justify-content: center;
+}
+
+.side-pot,
+.player-badge {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 24%);
+  font-size: 11px;
+}
+
+.player.disconnected {
+  border-style: dashed;
+  opacity: 0.58;
+}
+
+.revealed-cards {
+  color: #ffe19b;
+}
+
+.quick-raises button {
+  min-height: 34px;
+  padding: 0 9px;
+  background: #b8873f;
+}
+
+@media (max-width: 920px) {
+  .room-entry-grid,
+  .room-row {
+    grid-template-columns: 1fr;
   }
 }

@@ -68,7 +68,7 @@ install_config() {
   mkdir -p "${ENV_DIR}"
   if [[ ! -f "${ENV_DIR}/dz.env" ]]; then
     install -m 0640 -o root -g "${APP_USER}" "${APP_DIR}/deploy/dz.env.example" "${ENV_DIR}/dz.env"
-    echo "Created ${ENV_DIR}/dz.env. Edit DZ_DOMAIN and MEDIASOUP_ANNOUNCED_IP before public use." >&2
+    echo "Created ${ENV_DIR}/dz.env. Edit DZ_ACCESS_CODE, DZ_DOMAIN, and MEDIASOUP_ANNOUNCED_IP before public use." >&2
   fi
 
   install -m 0644 "${APP_DIR}/deploy/systemd/dz-game.service" /etc/systemd/system/dz-game.service
@@ -101,6 +101,6 @@ Next checks:
   curl -g http://[::1]:8080/healthz
   curl -g http://[::1]:3001/healthz
 
-Make sure /etc/dz/dz.env has a real DZ_DOMAIN and public MEDIASOUP_ANNOUNCED_IP.
+Make sure /etc/dz/dz.env has a private DZ_ACCESS_CODE, real DZ_DOMAIN, and public MEDIASOUP_ANNOUNCED_IP.
 Open 80/tcp, 443/tcp, and MEDIASOUP_MIN_PORT-MEDIASOUP_MAX_PORT udp/tcp.
 EOF

@@ -14,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -113,14 +114,20 @@ static int json_int(std::string_view body, std::string_view key, int fallback = 
         sign = -1;
         ++pos;
     }
-    int value = 0;
+    int64_t value = 0;
     bool any = false;
     while (pos < body.size() && std::isdigit(static_cast<unsigned char>(body[pos]))) {
         any = true;
-        value = value * 10 + (body[pos] - '0');
+        const int digit = body[pos] - '0';
+        if (value > (std::numeric_limits<int64_t>::max() - digit) / 10) return fallback;
+        value = value * 10 + digit;
         ++pos;
     }
-    return any ? value * sign : fallback;
+    if (!any) return fallback;
+    const int64_t signed_value = sign < 0 ? -value : value;
+    if (signed_value < std::numeric_limits<int>::min()
+        || signed_value > std::numeric_limits<int>::max()) return fallback;
+    return static_cast<int>(signed_value);
 }
 
 static bool json_bool(std::string_view body, std::string_view key, bool fallback = false) {
@@ -157,6 +164,7 @@ struct Player {
     bool folded = false;
     bool all_in = false;
     bool sitting_out = false;
+    bool present = true;
     std::vector<Card> hole;
 };
 
@@ -165,12 +173,18 @@ enum class GameMode { Holdem, ShortDeck };
 
 struct Room {
     std::string id;
+    std::string host_id;
+    std::string invite_code;
     std::vector<Player> players;
     std::vector<Card> deck;
     std::vector<Card> community;
     Phase phase = Phase::Waiting;
     int dealer = 0;
+    int small_blind_index = -1;
+    int big_blind_index = -1;
     int current = 0;
+    uint64_t action_serial = 0;
+    bool reveal_cards = false;
     int highest_bet = 0;
     int min_raise = 20;
     int pot = 0;
@@ -178,27 +192,51 @@ struct Room {
     int big_blind = 20;
     GameMode mode = GameMode::Holdem;
     std::set<std::string> acted;
+    std::unordered_map<std::string, int> last_action_bet;
+    std::set<std::string> checked;
 };
 
 class WsSession;
+struct GameLogicTestAccess;
 
 class GameHub {
 public:
-    std::string add_session(std::shared_ptr<WsSession> session);
+    explicit GameHub(std::string access_code, asio::io_context* ioc = nullptr)
+        : ioc_(ioc), access_code_(std::move(access_code)) {}
+
+    std::string add_session(std::shared_ptr<WsSession> session, std::string client_address);
     void remove_session(const std::string& id);
     void on_message(const std::string& id, const std::string& text);
     void send_to(const std::string& id, const std::string& text);
 
 private:
+    friend struct GameLogicTestAccess;
+
     std::mutex mutex_;
     std::unordered_map<std::string, std::weak_ptr<WsSession>> sessions_;
     std::unordered_map<std::string, std::string> session_room_;
+    std::unordered_map<std::string, std::string> session_account_;
+    std::unordered_map<std::string, std::string> session_address_;
+    struct LoginGuard {
+        int failures = 0;
+        std::chrono::steady_clock::time_point locked_until{};
+    };
+    std::unordered_map<std::string, LoginGuard> login_guards_;
     std::unordered_map<std::string, Room> rooms_;
+    std::unordered_map<std::string, std::shared_ptr<asio::steady_timer>> showdown_timers_;
+    std::unordered_map<std::string, std::shared_ptr<asio::steady_timer>> action_timers_;
     std::atomic_uint64_t next_id_{1};
+    asio::io_context* ioc_ = nullptr;
+    std::string access_code_;
 
     std::string make_id();
-    void join_room_locked(const std::string& id, std::string room_id, std::string name);
-    void start_locked(Room& room);
+    void login_locked(const std::string& id, std::string account);
+    void send_session_locked(const std::string& id, const std::string& text);
+    void leave_room_locked(const std::string& id, const std::string& room_id);
+    void erase_player_locked(Room& room, int index);
+    void create_room_locked(const std::string& id, std::string room_id, std::string name, std::string invite_code);
+    void join_room_locked(const std::string& id, std::string room_id, std::string name, std::string invite_code = "");
+    void start_locked(const std::string& id, Room& room);
     void action_locked(const std::string& id, std::string action, int amount);
     void set_mode_locked(const std::string& id, std::string mode);
     void set_sitting_out_locked(const std::string& id, bool sitting_out);
@@ -209,27 +247,47 @@ private:
     int next_playable_after_locked(const Room& room, int from) const;
     int next_pending_actor_after_locked(const Room& room, int from) const;
     bool has_pending_actor_locked(const Room& room) const;
+    int active_player_count_locked(const Room& room) const;
+    int actionable_player_count_locked(const Room& room) const;
+    bool can_raise_locked(const Room& room, const Player& player) const;
     void runout_to_showdown_locked(Room& room);
     void settle_showdown_locked(Room& room, std::string reason);
+    void arm_action_timer_locked(Room& room);
+    void schedule_finish_locked(Room& room);
     void finish_hand_locked(Room& room);
     void broadcast_locked(const Room& room, const std::string& text);
     void emit_state_locked(const Room& room);
     void emit_event_locked(const Room& room, std::string message);
+    void emit_lobby_locked();
     Player* find_player(Room& room, const std::string& id);
 };
 
 class WsSession : public std::enable_shared_from_this<WsSession> {
 public:
     WsSession(tcp::socket socket, GameHub& hub)
-        : ws_(std::move(socket)), hub_(hub) {}
+        : client_address_([&socket] {
+              beast::error_code ec;
+              const auto endpoint = socket.remote_endpoint(ec);
+              return ec ? std::string("unknown") : endpoint.address().to_string();
+          }()), ws_(std::move(socket)), hub_(hub) {}
 
     void run(http::request<http::string_body> req) {
+        if (client_address_ == "127.0.0.1" || client_address_ == "::1") {
+            std::string forwarded = std::string(req.base()["X-Forwarded-For"]);
+            if (!forwarded.empty()) {
+                const size_t comma = forwarded.find(',');
+                forwarded = forwarded.substr(0, comma);
+                const size_t first = forwarded.find_first_not_of(" \t");
+                const size_t last = forwarded.find_last_not_of(" \t");
+                if (first != std::string::npos) client_address_ = forwarded.substr(first, last - first + 1);
+            }
+        }
         ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::server));
         ws_.set_option(websocket::stream_base::decorator([](websocket::response_type& res) {
             res.set(http::field::server, "web-texas-webrtc");
         }));
         ws_.accept(req);
-        id_ = hub_.add_session(shared_from_this());
+        id_ = hub_.add_session(shared_from_this(), client_address_);
         send("{\"type\":\"hello\",\"id\":\"" + json_escape(id_) + "\"}");
         read_loop();
     }
@@ -243,6 +301,7 @@ public:
     }
 
 private:
+    std::string client_address_;
     websocket::stream<tcp::socket> ws_;
     GameHub& hub_;
     beast::flat_buffer buffer_;
@@ -443,10 +502,11 @@ std::string GameHub::make_id() {
     return "p" + std::to_string(next_id_.fetch_add(1));
 }
 
-std::string GameHub::add_session(std::shared_ptr<WsSession> session) {
+std::string GameHub::add_session(std::shared_ptr<WsSession> session, std::string client_address) {
     std::lock_guard lock(mutex_);
     std::string id = make_id();
     sessions_[id] = session;
+    session_address_[id] = std::move(client_address);
     return id;
 }
 
@@ -454,35 +514,172 @@ void GameHub::remove_session(const std::string& id) {
     std::lock_guard lock(mutex_);
     auto room_it = session_room_.find(id);
     if (room_it != session_room_.end()) {
-        auto r = rooms_.find(room_it->second);
-        if (r != rooms_.end()) {
-            auto& players = r->second.players;
-            auto old_size = players.size();
-            players.erase(std::remove_if(players.begin(), players.end(), [&](const Player& p) { return p.id == id; }), players.end());
-            if (players.size() != old_size) {
-                broadcast_locked(r->second, "{\"type\":\"peer-left\",\"id\":\"" + json_escape(id) + "\"}");
-                if (players.empty()) {
-                    rooms_.erase(r);
-                } else {
-                    r->second.current %= static_cast<int>(players.size());
-                    r->second.dealer %= static_cast<int>(players.size());
-                    emit_state_locked(r->second);
-                }
-            }
-        }
+        leave_room_locked(id, room_it->second);
         session_room_.erase(room_it);
     }
+    session_account_.erase(id);
+    session_address_.erase(id);
     sessions_.erase(id);
+}
+
+void GameHub::send_session_locked(const std::string& id, const std::string& text) {
+    auto session = sessions_.find(id);
+    if (session != sessions_.end()) {
+        if (auto locked = session->second.lock()) locked->send(text);
+    }
+}
+
+void GameHub::login_locked(const std::string& id, std::string account) {
+    constexpr int max_failures = 5;
+    constexpr auto lock_duration = std::chrono::minutes(15);
+    const std::string client_address = session_address_.contains(id) ? session_address_[id] : "unknown";
+    auto& guard = login_guards_[client_address];
+    const auto now = std::chrono::steady_clock::now();
+    if (guard.locked_until > now) {
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(guard.locked_until - now).count();
+        const auto minutes = std::max<int64_t>(1, (seconds + 59) / 60);
+        send_session_locked(id, "{\"type\":\"login-error\",\"message\":\"尝试次数过多，请 "
+            + std::to_string(minutes) + " 分钟后重试\"}");
+        return;
+    }
+    if (guard.failures >= max_failures) guard.failures = 0;
+
+    const bool valid = account.size() == 6
+        && std::all_of(account.begin(), account.end(), [](unsigned char c) { return std::isdigit(c); });
+
+    auto existing = session_account_.find(id);
+    if (existing != session_account_.end()) {
+        send_session_locked(id, "{\"type\":\"login-ok\"}");
+        return;
+    }
+
+    unsigned char difference = valid ? 0 : 1;
+    if (valid) {
+        for (size_t i = 0; i < access_code_.size(); ++i) {
+            difference |= static_cast<unsigned char>(account[i] ^ access_code_[i]);
+        }
+    }
+    if (difference != 0) {
+        ++guard.failures;
+        const int remaining = max_failures - guard.failures;
+        if (remaining <= 0) {
+            guard.locked_until = now + lock_duration;
+            send_session_locked(id, "{\"type\":\"login-error\",\"message\":\"连续输错 5 次，已锁定 15 分钟\"}");
+        } else {
+            send_session_locked(id, "{\"type\":\"login-error\",\"message\":\"访问码错误，还可尝试 "
+                + std::to_string(remaining) + " 次\"}");
+        }
+        return;
+    }
+
+    login_guards_.erase(client_address);
+    session_account_[id] = account;
+    send_session_locked(id, "{\"type\":\"login-ok\"}");
+    emit_lobby_locked();
+}
+
+void GameHub::erase_player_locked(Room& room, int index) {
+    if (index < 0 || index >= static_cast<int>(room.players.size())) return;
+    const int old_dealer = room.dealer;
+    const int old_current = room.current;
+    room.players.erase(room.players.begin() + index);
+    if (room.players.empty()) {
+        room.dealer = -1;
+        room.current = -1;
+        return;
+    }
+
+    const int n = static_cast<int>(room.players.size());
+    if (old_dealer == index) room.dealer = (index - 1 + n) % n;
+    else if (old_dealer > index) room.dealer = old_dealer - 1;
+    else room.dealer = std::clamp(old_dealer, 0, n - 1);
+
+    if (old_current == index) room.current = index % n;
+    else if (old_current > index) room.current = old_current - 1;
+    else room.current = std::clamp(old_current, 0, n - 1);
+}
+
+void GameHub::leave_room_locked(const std::string& id, const std::string& room_id) {
+    auto room_it = rooms_.find(room_id);
+    if (room_it == rooms_.end()) return;
+    Room& room = room_it->second;
+    int index = -1;
+    for (int i = 0; i < static_cast<int>(room.players.size()); ++i) {
+        if (room.players[i].id == id) {
+            index = i;
+            break;
+        }
+    }
+    if (index < 0) return;
+
+    Player& player = room.players[index];
+    player.present = false;
+    broadcast_locked(room, "{\"type\":\"peer-left\",\"id\":\"" + json_escape(id) + "\"}");
+
+    if (room.host_id == id) {
+        room.host_id.clear();
+        for (const auto& candidate : room.players) {
+            if (candidate.present) {
+                room.host_id = candidate.id;
+                emit_event_locked(room, candidate.name + " 成为新房主");
+                break;
+            }
+        }
+    }
+
+    if (room.phase == Phase::Waiting) {
+        erase_player_locked(room, index);
+    } else if (room.phase != Phase::Showdown) {
+        const bool was_current = room.current == index;
+        // An already all-in player has no pending decision and remains eligible
+        // for the pot after a network disconnect. Other departures fold.
+        if (!player.folded && !player.all_in) {
+            player.folded = true;
+            room.acted.insert(id);
+            room.checked.erase(id);
+        }
+        if (active_player_count_locked(room) <= 1 || was_current) {
+            advance_after_action_locked(room);
+        }
+    }
+
+    if (room.players.empty()) {
+        rooms_.erase(room_it);
+    } else {
+        emit_state_locked(room);
+    }
+    emit_lobby_locked();
 }
 
 void GameHub::on_message(const std::string& id, const std::string& text) {
     std::lock_guard lock(mutex_);
     const auto type = json_string(text, "type").value_or("");
-    if (type == "join") {
-        join_room_locked(id, json_string(text, "room").value_or("demo"), json_string(text, "name").value_or(id));
+    if (type == "login") {
+        login_locked(id, json_string(text, "account").value_or(""));
+        return;
+    }
+    if (!session_account_.contains(id)) {
+        send_session_locked(id, "{\"type\":\"login-error\",\"message\":\"请先输入 6 位私密访问码\"}");
+        return;
+    }
+    if (type == "create-room") {
+        create_room_locked(id, json_string(text, "room").value_or(""), json_string(text, "name").value_or(id),
+            json_string(text, "invite").value_or(""));
+    } else if (type == "join") {
+        join_room_locked(id, json_string(text, "room").value_or(""), json_string(text, "name").value_or(id),
+            json_string(text, "invite").value_or(""));
+    } else if (type == "list-rooms") {
+        emit_lobby_locked();
+    } else if (type == "leave") {
+        auto it = session_room_.find(id);
+        if (it != session_room_.end()) {
+            const std::string room_id = it->second;
+            leave_room_locked(id, room_id);
+            session_room_.erase(it);
+        }
     } else if (type == "start") {
         auto it = session_room_.find(id);
-        if (it != session_room_.end()) start_locked(rooms_[it->second]);
+        if (it != session_room_.end()) start_locked(id, rooms_[it->second]);
     } else if (type == "action") {
         action_locked(id, json_string(text, "action").value_or("check"), json_int(text, "amount", 0));
     } else if (type == "mode") {
@@ -511,41 +708,78 @@ Player* GameHub::find_player(Room& room, const std::string& id) {
     return nullptr;
 }
 
-void GameHub::join_room_locked(const std::string& id, std::string room_id, std::string name) {
-    if (room_id.empty()) room_id = "demo";
+void GameHub::create_room_locked(
+    const std::string& id, std::string room_id, std::string name, std::string invite_code) {
+    room_id = room_id.substr(0, 32);
+    if (room_id.empty()) {
+        send_session_locked(id, "{\"type\":\"event\",\"message\":\"请输入房间名\"}");
+        return;
+    }
+    if (rooms_.contains(room_id)) {
+        send_session_locked(id, "{\"type\":\"event\",\"message\":\"房间已存在，请直接加入\"}");
+        return;
+    }
+    if (!invite_code.empty()) {
+        const bool valid_invite = invite_code.size() >= 4 && invite_code.size() <= 12
+            && std::all_of(invite_code.begin(), invite_code.end(), [](unsigned char c) { return std::isalnum(c); });
+        if (!valid_invite) {
+            send_session_locked(id, "{\"type\":\"event\",\"message\":\"邀请码需为 4-12 位字母或数字\"}");
+            return;
+        }
+    }
+    Room room;
+    room.id = room_id;
+    room.invite_code = invite_code;
+    rooms_.emplace(room_id, std::move(room));
+    join_room_locked(id, room_id, std::move(name), invite_code);
+}
+
+void GameHub::join_room_locked(
+    const std::string& id, std::string room_id, std::string name, std::string invite_code) {
+    room_id = room_id.substr(0, 32);
     if (name.empty()) name = id;
 
-    auto current_room = session_room_.find(id);
-    if (current_room != session_room_.end() && current_room->second != room_id) {
-        auto old_room = rooms_.find(current_room->second);
-        if (old_room != rooms_.end()) {
-            auto& old_players = old_room->second.players;
-            old_players.erase(std::remove_if(old_players.begin(), old_players.end(), [&](const Player& p) {
-                return p.id == id;
-            }), old_players.end());
-            broadcast_locked(old_room->second, "{\"type\":\"peer-left\",\"id\":\"" + json_escape(id) + "\"}");
-            if (old_players.empty()) {
-                rooms_.erase(old_room);
-            } else {
-                old_room->second.current %= static_cast<int>(old_players.size());
-                old_room->second.dealer %= static_cast<int>(old_players.size());
-                emit_state_locked(old_room->second);
+    constexpr int max_players = 9;
+    auto requested_room = rooms_.find(room_id);
+    if (requested_room == rooms_.end()) {
+        send_session_locked(id, "{\"type\":\"event\",\"message\":\"房间不存在，请先创建\"}");
+        return;
+    }
+    if (!requested_room->second.invite_code.empty() && requested_room->second.invite_code != invite_code) {
+        send_session_locked(id, "{\"type\":\"event\",\"message\":\"房间邀请码错误\"}");
+        return;
+    }
+    if (!find_player(requested_room->second, id)) {
+        const int present_players = static_cast<int>(std::count_if(
+            requested_room->second.players.begin(), requested_room->second.players.end(),
+            [](const Player& player) { return player.present; }));
+        if (present_players >= max_players) {
+            auto session = sessions_.find(id);
+            if (session != sessions_.end()) if (auto locked = session->second.lock()) {
+                locked->send("{\"type\":\"event\",\"message\":\"房间已满（最多 9 人）\"}");
             }
+            return;
         }
     }
 
-    Room& room = rooms_[room_id];
-    room.id = room_id;
+    auto current_room = session_room_.find(id);
+    if (current_room != session_room_.end() && current_room->second != room_id) {
+        leave_room_locked(id, current_room->second);
+    }
+
+    Room& room = requested_room->second;
     session_room_[id] = room_id;
 
     if (auto* existing = find_player(room, id)) {
         existing->name = name.substr(0, 24);
+        existing->present = true;
     } else {
         Player player;
         player.id = id;
         player.name = name.substr(0, 24);
         room.players.push_back(player);
     }
+    if (room.host_id.empty()) room.host_id = id;
 
     if (auto it = sessions_.find(id); it != sessions_.end()) {
         if (auto session = it->second.lock()) {
@@ -554,9 +788,17 @@ void GameHub::join_room_locked(const std::string& id, std::string room_id, std::
     }
     broadcast_locked(room, "{\"type\":\"peer-joined\",\"id\":\"" + json_escape(id) + "\",\"name\":\"" + json_escape(name) + "\"}");
     emit_state_locked(room);
+    emit_lobby_locked();
 }
 
-void GameHub::start_locked(Room& room) {
+void GameHub::start_locked(const std::string& id, Room& room) {
+    if (room.host_id != id) {
+        auto session = sessions_.find(id);
+        if (session != sessions_.end()) if (auto locked = session->second.lock()) {
+            locked->send("{\"type\":\"event\",\"message\":\"只有房主可以开局\"}");
+        }
+        return;
+    }
     if (room.phase != Phase::Waiting) {
         emit_event_locked(room, "当前牌局尚未结束");
         return;
@@ -574,7 +816,10 @@ void GameHub::start_locked(Room& room) {
     room.highest_bet = room.big_blind;
     room.min_raise = room.big_blind;
     room.pot = 0;
+    room.reveal_cards = false;
     room.acted.clear();
+    room.last_action_bet.clear();
+    room.checked.clear();
 
     for (auto& p : room.players) {
         p.bet = 0;
@@ -594,6 +839,8 @@ void GameHub::start_locked(Room& room) {
     room.dealer = next_playable_after_locked(room, room.dealer);
     const int sb = playable.size() == 2 ? room.dealer : next_playable_after_locked(room, room.dealer);
     const int bb = next_playable_after_locked(room, sb);
+    room.small_blind_index = sb;
+    room.big_blind_index = bb;
     auto post = [&](int index, int amount) {
         int paid = std::min(room.players[index].chips, amount);
         room.players[index].chips -= paid;
@@ -605,19 +852,30 @@ void GameHub::start_locked(Room& room) {
     post(bb, room.big_blind);
     room.players[sb].all_in = room.players[sb].chips == 0;
     room.players[bb].all_in = room.players[bb].chips == 0;
+    emit_event_locked(room, "新牌局开始（" + std::string(room.mode == GameMode::ShortDeck ? "短牌 6+" : "标准德州") + "）");
     room.current = next_pending_actor_after_locked(room, bb);
+    ++room.action_serial;
     if (room.current < 0) {
         runout_to_showdown_locked(room);
+    } else {
+        arm_action_timer_locked(room);
     }
 
-    emit_event_locked(room, "新牌局开始 (" + mode_text(room.mode) + ")");
     emit_state_locked(room);
+    emit_lobby_locked();
 }
 
 void GameHub::set_mode_locked(const std::string& id, std::string mode) {
     auto room_name = session_room_.find(id);
     if (room_name == session_room_.end()) return;
     Room& room = rooms_[room_name->second];
+    if (room.host_id != id) {
+        auto session = sessions_.find(id);
+        if (session != sessions_.end()) if (auto locked = session->second.lock()) {
+            locked->send("{\"type\":\"event\",\"message\":\"只有房主可以切换玩法\"}");
+        }
+        return;
+    }
     if (room.phase != Phase::Waiting) {
         emit_event_locked(room, "玩法只能在牌局等待状态切换");
         return;
@@ -625,6 +883,7 @@ void GameHub::set_mode_locked(const std::string& id, std::string mode) {
     room.mode = parse_mode(std::move(mode));
     emit_event_locked(room, "玩法切换为 " + std::string(room.mode == GameMode::ShortDeck ? "短牌" : "标准德州"));
     emit_state_locked(room);
+    emit_lobby_locked();
 }
 
 void GameHub::set_sitting_out_locked(const std::string& id, bool sitting_out) {
@@ -637,10 +896,16 @@ void GameHub::set_sitting_out_locked(const std::string& id, bool sitting_out) {
     player->sitting_out = sitting_out;
     emit_event_locked(room, player->name + (sitting_out ? " 暂离牌局，进入旁观" : " 回到牌局，下一手可参与"));
 
-    if (sitting_out && room.phase != Phase::Waiting && !player->folded && !player->all_in) {
+    if (sitting_out && room.phase != Phase::Waiting && !player->folded) {
+        const bool was_current = room.current >= 0
+            && room.current < static_cast<int>(room.players.size())
+            && room.players[room.current].id == id;
         player->folded = true;
         room.acted.insert(id);
-        advance_after_action_locked(room);
+        room.checked.erase(id);
+        if (active_player_count_locked(room) <= 1 || was_current) {
+            advance_after_action_locked(room);
+        }
     }
 
     emit_state_locked(room);
@@ -657,7 +922,8 @@ void GameHub::transfer_chips_locked(const std::string& id, std::string to, int a
 
     Player* from_player = find_player(room, id);
     Player* to_player = find_player(room, to);
-    if (!from_player || !to_player || from_player->chips < amount) {
+    if (!from_player || !to_player || from_player->chips < amount
+        || to_player->chips > std::numeric_limits<int>::max() - amount) {
         emit_event_locked(room, "筹码转移失败");
         return;
     }
@@ -680,11 +946,14 @@ void GameHub::action_locked(const std::string& id, std::string action, int amoun
     const int to_call = std::max(0, room.highest_bet - p.bet);
     const int stack_total = p.bet + p.chips;
     const int previous_highest = room.highest_bet;
+    std::string action_text;
 
     if (action == "fold") {
         p.folded = true;
+        action_text = "弃牌";
     } else if (action == "check") {
         if (to_call != 0) return;
+        action_text = "过牌";
     } else if (action == "call") {
         if (to_call == 0) return;
         int paid = std::min(p.chips, to_call);
@@ -693,14 +962,15 @@ void GameHub::action_locked(const std::string& id, std::string action, int amoun
         p.committed += paid;
         room.pot += paid;
         p.all_in = p.chips == 0;
+        action_text = p.all_in ? "全下跟注 " + std::to_string(paid) : "跟注 " + std::to_string(paid);
     } else if (action == "raise") {
+        if (!can_raise_locked(room, p)) return;
+        int target = std::min(amount, stack_total);
+        if (target <= previous_highest) return;
         const int min_target = room.highest_bet == 0 || room.highest_bet < room.big_blind
             ? room.big_blind
             : room.highest_bet + room.min_raise;
-        int target = amount;
-        if (target <= previous_highest) return;
         if (target < min_target && stack_total >= min_target) return;
-        target = std::min(target, stack_total);
         if (target <= p.bet) return;
         int need = std::max(0, target - p.bet);
         p.chips -= need;
@@ -718,12 +988,16 @@ void GameHub::action_locked(const std::string& id, std::string action, int amoun
                 room.acted.clear();
             }
         }
+        action_text = p.all_in ? "全下到 " + std::to_string(p.bet) : "加注到 " + std::to_string(p.bet);
     } else {
         return;
     }
 
+    if (action == "check") room.checked.insert(id);
+    else room.checked.erase(id);
+    room.last_action_bet[id] = room.highest_bet;
     room.acted.insert(id);
-    emit_event_locked(room, p.name + " " + action);
+    emit_event_locked(room, p.name + " " + action_text);
     advance_after_action_locked(room);
     emit_state_locked(room);
 }
@@ -732,7 +1006,7 @@ std::vector<int> GameHub::playable_indices_locked(const Room& room) const {
     std::vector<int> indices;
     for (int i = 0; i < static_cast<int>(room.players.size()); ++i) {
         const auto& p = room.players[i];
-        if (!p.sitting_out && p.chips > 0) indices.push_back(i);
+        if (p.present && !p.sitting_out && p.chips > 0) indices.push_back(i);
     }
     return indices;
 }
@@ -743,7 +1017,7 @@ int GameHub::next_playable_after_locked(const Room& room, int from) const {
     for (int step = 1; step <= n; ++step) {
         int next = (from + step + n) % n;
         const auto& p = room.players[next];
-        if (!p.sitting_out && p.chips > 0) return next;
+        if (p.present && !p.sitting_out && p.chips > 0) return next;
     }
     return -1;
 }
@@ -754,7 +1028,7 @@ int GameHub::next_pending_actor_after_locked(const Room& room, int from) const {
     for (int step = 1; step <= n; ++step) {
         int next = (from + step + n) % n;
         const auto& p = room.players[next];
-        if (!p.sitting_out && !p.folded && !p.all_in) return next;
+        if (p.present && !p.sitting_out && !p.folded && !p.all_in) return next;
     }
     return -1;
 }
@@ -762,14 +1036,19 @@ int GameHub::next_pending_actor_after_locked(const Room& room, int from) const {
 void GameHub::advance_after_action_locked(Room& room) {
     std::vector<int> active;
     for (int i = 0; i < static_cast<int>(room.players.size()); ++i) {
-        if (!room.players[i].sitting_out && !room.players[i].folded) active.push_back(i);
+        if (!room.players[i].folded) active.push_back(i);
+    }
+    if (active.empty()) {
+        finish_hand_locked(room);
+        return;
     }
     if (active.size() == 1) {
         Player& winner = room.players[active[0]];
         winner.chips += room.pot;
         emit_event_locked(room, winner.name + " 赢得底池 " + std::to_string(room.pot));
         room.current = active[0];
-        finish_hand_locked(room);
+        room.reveal_cards = false;
+        schedule_finish_locked(room);
         return;
     }
 
@@ -794,6 +1073,8 @@ void GameHub::advance_after_action_locked(Room& room) {
     int next = next_pending_actor_after_locked(room, room.current);
     if (next >= 0) {
         room.current = next;
+        ++room.action_serial;
+        arm_action_timer_locked(room);
         return;
     }
     next_phase_locked(room);
@@ -804,6 +1085,8 @@ void GameHub::next_phase_locked(Room& room) {
     room.highest_bet = 0;
     room.min_raise = room.big_blind;
     room.acted.clear();
+    room.last_action_bet.clear();
+    room.checked.clear();
 
     auto draw = [&]() {
         if (!room.deck.empty()) {
@@ -826,17 +1109,42 @@ void GameHub::next_phase_locked(Room& room) {
         return;
     }
 
-    room.current = next_pending_actor_after_locked(room, room.dealer);
+    emit_lobby_locked();
 
-    if (!has_pending_actor_locked(room)) {
+    room.current = next_pending_actor_after_locked(room, room.dealer);
+    ++room.action_serial;
+
+    if (actionable_player_count_locked(room) <= 1) {
         runout_to_showdown_locked(room);
+    } else {
+        arm_action_timer_locked(room);
     }
 }
 
 bool GameHub::has_pending_actor_locked(const Room& room) const {
     return std::any_of(room.players.begin(), room.players.end(), [](const Player& p) {
-        return !p.sitting_out && !p.folded && !p.all_in;
+        return p.present && !p.sitting_out && !p.folded && !p.all_in;
     });
+}
+
+int GameHub::active_player_count_locked(const Room& room) const {
+    return static_cast<int>(std::count_if(room.players.begin(), room.players.end(), [](const Player& p) {
+        return !p.folded;
+    }));
+}
+
+int GameHub::actionable_player_count_locked(const Room& room) const {
+    return static_cast<int>(std::count_if(room.players.begin(), room.players.end(), [](const Player& p) {
+        return p.present && !p.sitting_out && !p.folded && !p.all_in;
+    }));
+}
+
+bool GameHub::can_raise_locked(const Room& room, const Player& player) const {
+    if (player.folded || player.all_in || player.sitting_out || !player.present) return false;
+    auto last = room.last_action_bet.find(player.id);
+    if (last == room.last_action_bet.end()) return true;
+    if (room.checked.contains(player.id) && room.highest_bet > last->second) return true;
+    return room.highest_bet - last->second >= room.min_raise;
 }
 
 void GameHub::runout_to_showdown_locked(Room& room) {
@@ -868,6 +1176,7 @@ void GameHub::runout_to_showdown_locked(Room& room) {
 }
 
 void GameHub::settle_showdown_locked(Room& room, std::string reason) {
+    room.reveal_cards = true;
     struct Score {
         int index = -1;
         uint64_t value = 0;
@@ -876,7 +1185,7 @@ void GameHub::settle_showdown_locked(Room& room, std::string reason) {
     std::vector<Score> scores;
     for (int i = 0; i < static_cast<int>(room.players.size()); ++i) {
         const auto& player = room.players[i];
-        if (player.sitting_out || player.folded || player.committed <= 0) continue;
+        if (player.folded || player.committed <= 0) continue;
         std::vector<Card> seven = player.hole;
         seven.insert(seven.end(), room.community.begin(), room.community.end());
         scores.push_back(Score{i, evaluate_best_hand(seven, room.mode)});
@@ -932,14 +1241,86 @@ void GameHub::settle_showdown_locked(Room& room, std::string reason) {
         emit_event_locked(room, msg.str());
     }
 
-    finish_hand_locked(room);
+    schedule_finish_locked(room);
+}
+
+void GameHub::schedule_finish_locked(Room& room) {
+    if (auto action_timer = action_timers_.find(room.id); action_timer != action_timers_.end()) {
+        action_timer->second->cancel();
+        action_timers_.erase(action_timer);
+    }
+    room.phase = Phase::Showdown;
+    emit_state_locked(room);
+    emit_lobby_locked();
+    if (!ioc_) {
+        finish_hand_locked(room);
+        return;
+    }
+
+    auto timer = std::make_shared<asio::steady_timer>(*ioc_, std::chrono::seconds(6));
+    showdown_timers_[room.id] = timer;
+    const std::string room_id = room.id;
+    timer->async_wait([this, room_id, timer](beast::error_code ec) {
+        if (ec) return;
+        std::lock_guard lock(mutex_);
+        auto found = rooms_.find(room_id);
+        if (found == rooms_.end() || found->second.phase != Phase::Showdown) return;
+        finish_hand_locked(found->second);
+        if (found->second.players.empty()) {
+            rooms_.erase(found);
+        } else {
+            emit_state_locked(found->second);
+        }
+        emit_lobby_locked();
+        showdown_timers_.erase(room_id);
+    });
+}
+
+void GameHub::arm_action_timer_locked(Room& room) {
+    if (!ioc_ || room.current < 0 || room.current >= static_cast<int>(room.players.size())) return;
+    if (auto existing = action_timers_.find(room.id); existing != action_timers_.end()) {
+        existing->second->cancel();
+    }
+    auto timer = std::make_shared<asio::steady_timer>(*ioc_, std::chrono::seconds(20));
+    action_timers_[room.id] = timer;
+    const std::string room_id = room.id;
+    const std::string player_id = room.players[room.current].id;
+    const uint64_t serial = room.action_serial;
+    timer->async_wait([this, room_id, player_id, serial, timer](beast::error_code ec) {
+        if (ec) return;
+        std::lock_guard lock(mutex_);
+        auto found = rooms_.find(room_id);
+        if (found == rooms_.end()) return;
+        Room& room = found->second;
+        if (room.phase == Phase::Waiting || room.phase == Phase::Showdown
+            || room.action_serial != serial || room.current < 0
+            || room.current >= static_cast<int>(room.players.size())
+            || room.players[room.current].id != player_id) return;
+        Player& player = room.players[room.current];
+        const bool can_check = player.bet == room.highest_bet;
+        emit_event_locked(room, player.name + (can_check ? " 超时，自动过牌" : " 超时，自动弃牌"));
+        action_locked(player_id, can_check ? "check" : "fold", 0);
+        auto current_timer = action_timers_.find(room_id);
+        if (current_timer != action_timers_.end() && current_timer->second == timer) {
+            action_timers_.erase(current_timer);
+        }
+    });
 }
 
 void GameHub::finish_hand_locked(Room& room) {
+    if (auto timer = action_timers_.find(room.id); timer != action_timers_.end()) {
+        timer->second->cancel();
+        action_timers_.erase(timer);
+    }
     room.pot = 0;
     room.highest_bet = 0;
     room.min_raise = room.big_blind;
+    room.reveal_cards = false;
+    room.small_blind_index = -1;
+    room.big_blind_index = -1;
     room.acted.clear();
+    room.last_action_bet.clear();
+    room.checked.clear();
     for (auto& player : room.players) {
         player.bet = 0;
         player.committed = 0;
@@ -947,11 +1328,15 @@ void GameHub::finish_hand_locked(Room& room) {
         player.folded = player.sitting_out;
         player.hole.clear();
     }
+    for (int i = static_cast<int>(room.players.size()) - 1; i >= 0; --i) {
+        if (!room.players[i].present) erase_player_locked(room, i);
+    }
     room.phase = Phase::Waiting;
 }
 
 void GameHub::broadcast_locked(const Room& room, const std::string& text) {
     for (const auto& player : room.players) {
+        if (!player.present) continue;
         auto it = sessions_.find(player.id);
         if (it != sessions_.end()) {
             if (auto session = it->second.lock()) session->send(text);
@@ -962,6 +1347,7 @@ void GameHub::broadcast_locked(const Room& room, const std::string& text) {
 void GameHub::emit_state_locked(const Room& room) {
     std::ostringstream common;
     common << "{\"type\":\"state\",\"room\":\"" << json_escape(room.id)
+           << "\",\"host\":\"" << json_escape(room.host_id)
            << "\",\"phase\":\"" << phase_text(room.phase)
            << "\",\"mode\":\"" << mode_text(room.mode)
            << "\",\"pot\":" << room.pot
@@ -969,31 +1355,72 @@ void GameHub::emit_state_locked(const Room& room) {
            << ",\"minRaise\":" << room.min_raise
            << ",\"smallBlind\":" << room.small_blind
            << ",\"bigBlind\":" << room.big_blind
+           << ",\"actionSerial\":" << room.action_serial
            << ",\"dealer\":\"" << (room.players.empty() || room.dealer < 0 || room.dealer >= static_cast<int>(room.players.size()) ? "" : json_escape(room.players[room.dealer].id))
+           << "\",\"smallBlindPlayer\":\"" << (room.small_blind_index < 0 || room.small_blind_index >= static_cast<int>(room.players.size()) ? "" : json_escape(room.players[room.small_blind_index].id))
+           << "\",\"bigBlindPlayer\":\"" << (room.big_blind_index < 0 || room.big_blind_index >= static_cast<int>(room.players.size()) ? "" : json_escape(room.players[room.big_blind_index].id))
            << "\",\"toAct\":\"" << (room.players.empty() || room.current < 0 || room.current >= static_cast<int>(room.players.size()) ? "" : json_escape(room.players[room.current].id))
            << "\",\"community\":[";
     for (size_t i = 0; i < room.community.size(); ++i) {
         if (i) common << ",";
         common << "\"" << room.community[i].text() << "\"";
     }
+    common << "],\"sidePots\":[";
+    std::vector<int> levels;
+    for (const auto& player : room.players) if (player.committed > 0) levels.push_back(player.committed);
+    std::sort(levels.begin(), levels.end());
+    levels.erase(std::unique(levels.begin(), levels.end()), levels.end());
+    int previous_level = 0;
+    bool first_pot = true;
+    for (int level : levels) {
+        int contributors = 0;
+        for (const auto& player : room.players) if (player.committed >= level) ++contributors;
+        const int amount = (level - previous_level) * contributors;
+        previous_level = level;
+        if (amount <= 0) continue;
+        if (!first_pot) common << ",";
+        first_pot = false;
+        common << "{\"amount\":" << amount << ",\"eligible\":[";
+        bool first_eligible = true;
+        for (const auto& player : room.players) {
+            if (player.folded || player.committed < level) continue;
+            if (!first_eligible) common << ",";
+            first_eligible = false;
+            common << "\"" << json_escape(player.id) << "\"";
+        }
+        common << "]}";
+    }
     common << "],\"players\":[";
-    for (size_t i = 0; i < room.players.size(); ++i) {
-        const auto& p = room.players[i];
-        if (i) common << ",";
+    bool first_player = true;
+    for (const auto& p : room.players) {
+        if (!p.present && room.phase == Phase::Waiting) continue;
+        if (!first_player) common << ",";
+        first_player = false;
         common << "{\"id\":\"" << json_escape(p.id)
                << "\",\"name\":\"" << json_escape(p.name)
-               << "\",\"chips\":" << p.chips
+               << "\",\"isHost\":" << (p.id == room.host_id ? "true" : "false")
+               << ",\"connected\":" << (p.present ? "true" : "false")
+               << ",\"chips\":" << p.chips
                << ",\"bet\":" << p.bet
                << ",\"committed\":" << p.committed
                << ",\"folded\":" << (p.folded ? "true" : "false")
                << ",\"allIn\":" << (p.all_in ? "true" : "false")
                << ",\"sittingOut\":" << (p.sitting_out ? "true" : "false")
-               << "}";
+               << ",\"canRaise\":" << (can_raise_locked(room, p) ? "true" : "false")
+               << ",\"cards\":[";
+        if (room.phase == Phase::Showdown && room.reveal_cards && !p.folded) {
+            for (size_t card_index = 0; card_index < p.hole.size(); ++card_index) {
+                if (card_index) common << ",";
+                common << "\"" << p.hole[card_index].text() << "\"";
+            }
+        }
+        common << "]}";
     }
     common << "]}";
     const std::string public_state = common.str();
 
     for (const auto& player : room.players) {
+        if (!player.present) continue;
         std::ostringstream personal;
         personal << "{\"type\":\"private\",\"cards\":[";
         for (size_t i = 0; i < player.hole.size(); ++i) {
@@ -1001,7 +1428,8 @@ void GameHub::emit_state_locked(const Room& room) {
             personal << "\"" << player.hole[i].text() << "\"";
         }
         personal << "]}";
-        if (auto session = sessions_[player.id].lock()) {
+        auto it = sessions_.find(player.id);
+        if (it != sessions_.end()) if (auto session = it->second.lock()) {
             session->send(public_state);
             session->send(personal.str());
         }
@@ -1010,6 +1438,30 @@ void GameHub::emit_state_locked(const Room& room) {
 
 void GameHub::emit_event_locked(const Room& room, std::string message) {
     broadcast_locked(room, "{\"type\":\"event\",\"message\":\"" + json_escape(message) + "\"}");
+}
+
+void GameHub::emit_lobby_locked() {
+    std::ostringstream out;
+    out << "{\"type\":\"rooms\",\"rooms\":[";
+    bool first = true;
+    for (const auto& [room_id, room] : rooms_) {
+        const int online = static_cast<int>(std::count_if(room.players.begin(), room.players.end(),
+            [](const Player& player) { return player.present; }));
+        if (!first) out << ",";
+        first = false;
+        out << "{\"id\":\"" << json_escape(room_id)
+            << "\",\"players\":" << online
+            << ",\"mode\":\"" << mode_text(room.mode)
+            << "\",\"phase\":\"" << phase_text(room.phase)
+            << "\",\"private\":" << (room.invite_code.empty() ? "false" : "true")
+            << "}";
+    }
+    out << "]}";
+    const std::string message = out.str();
+    for (const auto& [session_id, account] : session_account_) {
+        (void)account;
+        send_session_locked(session_id, message);
+    }
 }
 
 static std::string mime_type(std::string_view path) {
@@ -1139,16 +1591,22 @@ private:
     }
 };
 
+#ifndef DZ_NO_MAIN
 int main(int argc, char* argv[]) {
     try {
         const auto listen_host = argc > 1 ? std::string(argv[1]) : env_or_default("DZ_LISTEN_HOST", "::");
         const auto listen_port = argc > 2 ? std::string(argv[2]) : env_or_default("DZ_WEB_PORT", "8080");
+        const auto access_code = env_or_default("DZ_ACCESS_CODE", "");
+        if (access_code.size() != 6
+            || !std::all_of(access_code.begin(), access_code.end(), [](unsigned char c) { return std::isdigit(c); })) {
+            throw std::runtime_error("DZ_ACCESS_CODE must be set to exactly 6 digits");
+        }
         const auto address = asio::ip::make_address(listen_host);
         const unsigned short port = static_cast<unsigned short>(std::stoi(listen_port));
         const int threads = std::max(1u, std::thread::hardware_concurrency());
 
         asio::io_context ioc{threads};
-        GameHub hub;
+        GameHub hub(access_code, &ioc);
         std::make_shared<Listener>(ioc, tcp::endpoint{address, port}, hub)->run();
 
         std::vector<std::thread> pool;
@@ -1164,3 +1622,4 @@ int main(int argc, char* argv[]) {
     }
     return 0;
 }
+#endif

@@ -70,7 +70,7 @@ mkdir -p "${STAGING}/bin" "${STAGING}/mediasoup-server" "${OUTPUT_DIR}"
 
 cp "${GAME_BIN}" "${STAGING}/bin/web_texas_webrtc"
 cp -R web deploy scripts "${STAGING}/"
-cp README.md CMakeLists.txt docker-compose.yml "${STAGING}/"
+cp README.md CMakeLists.txt "${STAGING}/"
 cp mediasoup-server/package.json mediasoup-server/package-lock.json mediasoup-server/server.js "${STAGING}/mediasoup-server/"
 cp -R mediasoup-server/node_modules "${STAGING}/mediasoup-server/"
 

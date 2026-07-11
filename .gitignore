@@ -1,7 +1,6 @@
 build/
 build-*/
 deploy/dz.env
-deploy/dz.container.env
 deploy/windows/dz.windows.env
 node_modules/
 mediasoup-server/node_modules/

@@ -26,3 +26,21 @@ target_compile_definitions(web_texas_webrtc
     PRIVATE
         WEB_ROOT="${WEB_ROOT_COMPILE_PATH}"
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(game_logic_tests
+        tests/game_logic_tests.cpp
+    )
+    target_link_libraries(game_logic_tests
+        PRIVATE
+            Boost::system
+            Threads::Threads
+    )
+    target_compile_definitions(game_logic_tests
+        PRIVATE
+            DZ_NO_MAIN
+            WEB_ROOT="${WEB_ROOT_COMPILE_PATH}"
+    )
+    add_test(NAME game_logic_tests COMMAND game_logic_tests)
+endif()

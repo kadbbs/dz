@@ -27,7 +27,8 @@ sudo apt-get install -y build-essential cmake libboost-system-dev
 ```bash
 cmake -S . -B build
 cmake --build build -j
-./build/web_texas_webrtc :: 8080
+# 请把 654321 换成你自己的私密数字
+DZ_ACCESS_CODE=654321 ./build/web_texas_webrtc :: 8080
 ```
 
 打开：
@@ -37,6 +38,12 @@ http://localhost:8080
 ```
 
 多开几个浏览器窗口，输入同一个房间号即可测试多人牌局和 WebRTC 连接。
+
+运行棋牌核心逻辑测试：
+
+```bash
+ctest --test-dir build --output-on-failure
+```
 
 本地音视频需要先启动 mediasoup 服务：
 
@@ -68,7 +75,11 @@ window.DZ_CONFIG = {
 
 ## 业务逻辑
 
+页面流程为：私密访问码入口 → 游戏大厅 → 具体游戏。大厅当前提供德州扑克入口，并预留斗地主卡片；后续游戏可以继续按独立入口扩展。
+
 项目可以按 4 条主线理解：连接、房间、牌局、音视频。
+
+这是一个私人牌局，进入房间前必须输入房主配置并分享的 6 位数字访问码。正确访问码的登录次数不限；同一来源连续输错 5 次后会锁定 15 分钟，成功登录会清除此前的失败记录。访问码必须通过服务端环境变量 `DZ_ACCESS_CODE` 配置，不会发送到网页源码。
 
 ### 1. 连接层
 
@@ -85,21 +96,25 @@ window.DZ_CONFIG = {
 
 ### 2. 房间层
 
-玩家提交：
+玩家可以分别创建或加入房间：
 
 ```json
-{"type":"join","room":"demo","name":"Alice"}
+{"type":"create-room","room":"demo","name":"Alice","invite":"A1B2C3"}
+{"type":"join","room":"demo","name":"Bob","invite":"A1B2C3"}
+{"type":"leave"}
 ```
 
 服务端处理流程：
 
-1. 根据 `room` 找到或创建房间。
+1. 创建时检查房间名；加入时检查房间是否存在及可选邀请码。
 2. 把当前连接加入房间玩家列表。
 3. 给当前玩家返回 `welcome`。
 4. 给房间内所有玩家广播 `peer-joined`。
 5. 广播最新 `state`。
 
-房间当前只保存在内存里，服务重启后会清空。玩家断线时会从房间移除，如果房间没人了，房间对象也会被删除。
+房间当前只保存在内存里，服务重启后会清空。等待状态下玩家断线会立即从房间移除；牌局中断线时会保留其本手投入，尚未 all-in 的玩家按弃牌处理，已经 all-in 的玩家仍可参与摊牌，结算后再移除。每个房间最多允许 9 名在线玩家。
+
+房间首位加入的玩家是房主。只有房主可以开局和切换玩法；房主离开后，房主身份会自动转给下一位在线玩家。下注、旁观和个人筹码转移仍由玩家本人操作。
 
 房间成员和牌局玩家是分开的：
 
@@ -194,6 +209,9 @@ window.DZ_CONFIG = {
 - 结算时按不同 `committed` 层级切主池和边池。
 - 已弃牌玩家的投入仍留在对应底池内，但不能参与赢池。
 - 同牌型同踢脚时平分对应底池，无法整除的余数按当前座位顺序补给赢家。
+- 服务端为每次行动提供 20 秒倒计时，超时自动过牌或弃牌。
+- 摊牌后公开仍在局玩家的手牌并展示 6 秒，再回到等待状态。
+- 公共状态包含庄家、大小盲、主池/边池及各池可争夺玩家。
 
 ### 4. 状态广播
 
@@ -205,6 +223,7 @@ window.DZ_CONFIG = {
 {
   "type": "state",
   "room": "demo",
+  "host": "p1",
   "phase": "flop",
   "mode": "shortdeck",
   "pot": 120,
@@ -216,7 +235,7 @@ window.DZ_CONFIG = {
   "toAct": "p2",
   "community": ["As", "Th", "7d"],
   "players": [
-    {"id":"p1","name":"Alice","chips":1960,"bet":40,"committed":80,"folded":false,"allIn":false}
+    {"id":"p1","name":"Alice","isHost":true,"chips":1960,"bet":40,"committed":80,"folded":false,"allIn":false}
   ]
 }
 ```
@@ -254,19 +273,13 @@ C++ 服务端不处理音视频编码、解码和转发，只负责牌局状态�
 
 ## 部署
 
-### 部署选择
-
-当前提供两种部署路径：
-
-- Linux 原生/systemd：最适合公网 IPv6 生产机，脚本会安装依赖、编译 C++、配置 Caddy 和 systemd。
-- Docker Compose：适合 Linux x86_64、Linux ARM64、macOS 测试环境；同一套 Compose 编排 C++、mediasoup 和 Caddy。
+当前提供 Linux 原生/systemd 部署路径：脚本会安装依赖、编译 C++、配置 Caddy 和 systemd，适合公网 IPv6 生产机。
 
 ### GitHub Actions 构建产物
 
 仓库包含 `.github/workflows/build.yml`。push 到 GitHub 后会自动构建：
 
 - `dz-linux-x64.tar.gz`: Ubuntu 24.04 x64 原生运行包，包含 C++ 服务、Web 静态文件、mediasoup 服务和已安装的 Node 依赖。
-- Docker Compose build 校验：验证 `deploy/docker/Dockerfile.game` 和 `deploy/docker/Dockerfile.mediasoup` 都能构建。
 
 Linux artifact 解压后可先本地试跑：
 
@@ -278,50 +291,7 @@ editor deploy/dz.env
 ./scripts/linux/run_native.sh deploy/dz.env
 ```
 
-原生包仍需要目标机器安装对应运行环境：Node.js 22+ 和系统 C++/Boost 运行库；公网 HTTPS 入口还需要 Caddy。生产部署前请把环境文件里的 `DZ_DOMAIN` 和 `MEDIASOUP_ANNOUNCED_IP` 改成真实域名和公网地址。
-
-### Docker Compose 部署
-
-准备环境文件：
-
-```bash
-cp deploy/dz.container.env.example deploy/dz.container.env
-editor deploy/dz.container.env
-```
-
-至少改：
-
-```text
-DZ_DOMAIN=dz.example.com
-MEDIASOUP_ANNOUNCED_IP=2001:db8::10
-```
-
-容器示例默认发布 `40000-40100/udp,tcp`，适合小桌和测试；如果要承载更多并发，在 `deploy/dz.container.env` 里扩大 `MEDIASOUP_MAX_PORT`，并同步放行防火墙。
-
-启动：
-
-```bash
-docker compose --env-file deploy/dz.container.env up -d --build
-```
-
-查看状态：
-
-```bash
-docker compose --env-file deploy/dz.container.env ps
-docker compose --env-file deploy/dz.container.env logs -f
-```
-
-跨架构构建镜像示例：
-
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/docker/Dockerfile.game -t your-registry/dz-game:latest --push .
-
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f deploy/docker/Dockerfile.mediasoup -t your-registry/dz-mediasoup:latest --push .
-```
-
-公网部署仍然需要域名 AAAA 记录、80/443 端口和 mediasoup 媒体端口。
+原生包仍需要目标机器安装对应运行环境：Node.js 22+ 和系统 C++/Boost 运行库；公网 HTTPS 入口还需要 Caddy。生产部署前请设置私密的 `DZ_ACCESS_CODE`，并把 `DZ_DOMAIN` 和 `MEDIASOUP_ANNOUNCED_IP` 改成真实值。
 
 ### Linux 原生公网 IPv6 快速部署
 
@@ -337,13 +307,9 @@ dz.example.com AAAA 2001:db8::10
 
 ```text
 deploy/dz.env.example                 # Linux 原生生产环境变量
-deploy/dz.container.env.example       # Docker Compose 环境变量
 deploy/systemd/dz-game.service        # Linux C++ 牌局服务
 deploy/systemd/dz-mediasoup.service   # Linux mediasoup 服务
-deploy/docker/Dockerfile.game         # C++ 服务容器镜像
-deploy/docker/Dockerfile.mediasoup    # mediasoup 容器镜像
 deploy/caddy/Caddyfile                # Linux 原生 HTTPS + /mediasoup WSS 反代
-deploy/caddy/Caddyfile.docker         # Docker Compose Caddy 配置
 scripts/install_ipv6_host.sh          # Ubuntu/Debian 原生安装脚本
 ```
 
@@ -418,7 +384,8 @@ dz.example.com {
 启动 C++ 服务：
 
 ```bash
-./build/web_texas_webrtc ::1 8080
+# 请把 654321 换成你自己的私密数字
+DZ_ACCESS_CODE=654321 ./build/web_texas_webrtc ::1 8080
 ```
 
 前端配置：
@@ -498,6 +465,8 @@ src/
 客户端发给服务端：
 
 ```json
+{"type":"login","account":"123456"}
+{"type":"create-room","room":"demo","name":"Alice","invite":"A1B2C3"}
 {"type":"join","room":"demo","name":"Alice"}
 {"type":"mode","mode":"shortdeck"}
 {"type":"start"}
@@ -509,6 +478,7 @@ src/
 服务端会广播：
 
 ```json
+{"type":"login-ok"}
 {"type":"welcome","id":"...","room":"demo"}
 {"type":"state","players":[{"id":"...","chips":1900,"committed":100,"sittingOut":false}],"community":[...],"pot":120,"toAct":"..."}
 {"type":"event","message":"Alice call 20"}

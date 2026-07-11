@@ -3,30 +3,105 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Web 德州 Hold'em</title>
+  <title>私人空间</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main class="app">
+  <section id="loginScreen" class="login-screen">
+    <form id="loginForm" class="login-card">
+      <h1>私人空间</h1>
+      <p class="login-description">仅限受邀访问，请输入 6 位访问码。</p>
+      <input id="accountInput" inputmode="numeric" autocomplete="off" placeholder="6 位私密访问码" pattern="[0-9]{6}" minlength="6" maxlength="6" required autofocus>
+      <button id="loginBtn" type="submit">进入</button>
+      <p id="loginMessage">请输入访问码</p>
+    </form>
+  </section>
+
+  <section id="gameLobby" class="lobby-screen" hidden>
+    <div class="lobby-shell">
+      <div class="lobby-heading">
+        <h1>游戏大厅</h1>
+        <p>选择要进入的游戏</p>
+      </div>
+      <div class="game-grid">
+        <button id="texasGameBtn" class="game-tile" type="button">
+          <strong>德州扑克</strong>
+          <span>多人牌桌 · 标准 / 短牌</span>
+          <em>进入</em>
+        </button>
+        <button class="game-tile coming-soon" type="button" disabled>
+          <strong>斗地主</strong>
+          <span>三人对局</span>
+          <em>即将开放</em>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section id="texasLobby" class="lobby-screen" hidden>
+    <div class="lobby-shell">
+      <div class="lobby-heading lobby-heading-row">
+        <div>
+          <h1>德州扑克</h1>
+          <p>创建新房间，或加入已有房间</p>
+        </div>
+        <button id="backGameLobbyBtn" class="light-button" type="button">返回游戏大厅</button>
+      </div>
+
+      <div class="room-entry-grid">
+        <form id="createRoomForm" class="room-entry-card">
+          <h2>创建房间</h2>
+          <input id="createNameInput" autocomplete="name" placeholder="昵称" maxlength="24">
+          <input id="createRoomInput" placeholder="房间名" maxlength="32" required>
+          <input id="createInviteInput" placeholder="邀请码（可选，4-12 位）" minlength="4" maxlength="12" pattern="[A-Za-z0-9]{4,12}">
+          <button type="submit">创建并进入</button>
+        </form>
+        <form id="joinRoomForm" class="room-entry-card">
+          <h2>加入房间</h2>
+          <input id="joinNameInput" autocomplete="name" placeholder="昵称" maxlength="24">
+          <input id="joinRoomInput" placeholder="房间名" maxlength="32" required>
+          <input id="joinInviteInput" placeholder="邀请码（私密房间必填）" maxlength="12">
+          <button type="submit">加入</button>
+        </form>
+      </div>
+
+      <section class="room-browser">
+        <div id="recentRooms" class="recent-rooms"></div>
+        <div class="panel-title">
+          <h2>现有房间</h2>
+          <button id="refreshRoomsBtn" class="light-button" type="button">刷新</button>
+        </div>
+        <div id="roomList" class="room-list"></div>
+      </section>
+
+      <section class="rules-summary">
+        <h2>游戏说明</h2>
+        <p>支持标准德州和短牌 6+。每人两张手牌，与五张公共牌组合出最佳五张牌；房主负责切换玩法和开局。</p>
+      </section>
+    </div>
+  </section>
+
+  <main id="gameApp" class="app" hidden>
     <section class="table">
       <header class="topbar">
         <div>
           <h1>Web 德州 Hold'em</h1>
-          <p id="status">未连接</p>
+          <p><span id="roomTitle"></span> <span id="status">未连接</span></p>
         </div>
-        <form id="joinForm" class="join">
-          <input id="nameInput" autocomplete="name" placeholder="昵称" maxlength="24">
-          <input id="roomInput" placeholder="房间" value="demo" maxlength="32">
-          <button type="submit">入座</button>
-        </form>
+        <div class="topbar-actions">
+          <button id="backLobbyBtn" class="secondary-button" type="button">返回房间大厅</button>
+        </div>
       </header>
 
       <div class="board">
         <div class="meta">
           <span id="phase">waiting</span>
           <strong id="pot">底池 0</strong>
+          <strong id="turnNotice"></strong>
+          <span id="turnTimer"></span>
         </div>
         <div id="community" class="cards"></div>
+        <div id="sidePots" class="side-pots"></div>
       </div>
 
       <div id="players" class="players"></div>
@@ -37,6 +112,12 @@
         <button data-action="fold">弃牌</button>
         <button data-action="check">过牌</button>
         <button data-action="call">跟注</button>
+        <div class="quick-raises">
+          <button type="button" data-quick-raise="0.5">1/2 池</button>
+          <button type="button" data-quick-raise="0.667">2/3 池</button>
+          <button type="button" data-quick-raise="1">满池</button>
+          <button type="button" data-quick-raise="allin">All-in</button>
+        </div>
         <label>
           <span>加注到</span>
           <input id="raiseAmount" type="number" min="20" step="10" value="40">
