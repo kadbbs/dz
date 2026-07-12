@@ -68,6 +68,14 @@ struct GameLogicTestAccess {
         hub.set_mode_locked(id, std::move(mode));
     }
 
+    static void set_ante(GameHub& hub, const std::string& id, int amount) {
+        hub.set_ante_locked(id, amount);
+    }
+
+    static void transfer(GameHub& hub, const std::string& from, const std::string& to, int amount) {
+        hub.transfer_chips_locked(from, to, amount);
+    }
+
     static void sit_out(GameHub& hub, const std::string& id) {
         hub.set_sitting_out_locked(id, true);
     }
@@ -133,6 +141,68 @@ static void test_hand_rankings() {
         for (const auto& item : short_wheel) ++counts[item.rank];
         return counts;
     }(), GameMode::ShortDeck) == 9, "short deck: A-6-7-8-9 must be a nine-high straight");
+
+    const auto best = evaluate_best_hand_result({
+        card(14, 's'), card(13, 's'), card(12, 's'), card(11, 's'),
+        card(10, 's'), card(2, 'h'), card(2, 'd')}, GameMode::Holdem);
+    require(best.cards.size() == 5 && hand_category_text(best.value, GameMode::Holdem) == "同花顺",
+        "showdown evaluation must retain the exact best five-card combination");
+}
+
+static void test_heads_up_big_blind_round_transition() {
+    GameHub hub{"123456"};
+    GameLogicTestAccess::join(hub, "a", "r");
+    GameLogicTestAccess::join(hub, "b", "r");
+    Room& room = GameLogicTestAccess::room(hub, "r");
+    GameLogicTestAccess::start(hub, "a", room);
+
+    require(room.phase == Phase::Preflop && room.players[room.current].id == "b",
+        "heads-up preflop action must start with the dealer/small blind");
+    GameLogicTestAccess::action(hub, "b", "call");
+    require(room.players[room.current].id == "a", "the big blind must receive its preflop option");
+    GameLogicTestAccess::action(hub, "a", "check");
+    require(room.phase == Phase::Flop && room.players[room.current].id == "a",
+        "one big-blind check must end preflop; the same player then acts first on the new flop round");
+}
+
+static void test_chip_transfer_integrity() {
+    GameHub hub{"123456"};
+    GameLogicTestAccess::join(hub, "a", "r");
+    GameLogicTestAccess::join(hub, "b", "r");
+    Room& room = GameLogicTestAccess::room(hub, "r");
+    GameLogicTestAccess::transfer(hub, "a", "b", 750);
+    require(room.players[0].chips == 1250 && room.players[1].chips == 2750,
+        "chip transfer must debit and credit the exact same amount");
+    GameLogicTestAccess::transfer(hub, "a", "b", 2000);
+    require(room.players[0].chips == 1250 && room.players[1].chips == 2750,
+        "a transfer larger than the sender's stack must not change either balance");
+}
+
+static void test_ante_holdem_posts_every_player_without_blinds() {
+    GameHub hub{"123456"};
+    GameLogicTestAccess::join(hub, "a", "r");
+    GameLogicTestAccess::join(hub, "b", "r");
+    GameLogicTestAccess::join(hub, "c", "r");
+    Room& room = GameLogicTestAccess::room(hub, "r");
+
+    GameLogicTestAccess::set_mode(hub, "a", "ante");
+    GameLogicTestAccess::set_ante(hub, "b", 99);
+    require(room.ante == 20, "a non-host must not be allowed to change the ante");
+    GameLogicTestAccess::set_ante(hub, "a", 50);
+    GameLogicTestAccess::start(hub, "a", room);
+
+    require(room.mode == GameMode::AnteHoldem && room.ante == 50,
+        "the host must be able to configure ante holdem");
+    require(room.pot == 150 && room.highest_bet == 0,
+        "all three antes must enter the pot without creating a current-round bet");
+    require(room.small_blind_index == -1 && room.big_blind_index == -1,
+        "ante holdem must not assign small or big blinds");
+    for (const auto& player : room.players) {
+        require(player.chips == 1950 && player.committed == 50 && player.bet == 0,
+            "each player must post the exact ante while keeping round bet at zero");
+    }
+    require(room.players[room.current].id == "c",
+        "ante holdem preflop action must start to the left of the dealer");
 }
 
 static void test_private_access_code_and_rate_limit() {
@@ -349,6 +419,9 @@ static void test_automatic_runout() {
 int main() {
     try {
         test_hand_rankings();
+        test_heads_up_big_blind_round_transition();
+        test_chip_transfer_integrity();
+        test_ante_holdem_posts_every_player_without_blinds();
         test_private_access_code_and_rate_limit();
         test_host_permissions_and_succession();
         test_private_room_invite();

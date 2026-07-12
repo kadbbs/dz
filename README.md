@@ -6,7 +6,7 @@
 - C++ 后端负责房间、座位、牌局状态、下注轮次、广播和 WebRTC 信令转发。
 - 浏览器前端负责桌面 UI、牌局操作、WebSocket 通信和 mediasoup 音视频接入。
 - 音视频走独立 mediasoup SFU；C++ 后端只负责牌局，不转发媒体流。
-- 支持标准德州和短牌 6+ 两种玩法。
+- 支持标准德州、短牌 6+ 和无盲注底注德州三种玩法。
 
 ## 依赖
 
@@ -133,7 +133,9 @@ window.DZ_CONFIG = {
 
 房间玩法：
 
-- 房间支持 `holdem` 标准德州和 `shortdeck` 短牌 6+。
+- 房间支持 `holdem` 标准德州、`shortdeck` 短牌 6+ 和 `ante` 无盲注底注德州。
+- `ante` 模式没有大小盲，每手开始所有参局玩家投入房主设置的底注；底注进入底池但不计入当前下注轮，翻牌前从庄家左侧开始行动。
+- 房主可以在 `waiting` 状态设置 1 到 100000 的每人底注。
 - 玩法只能在 `waiting` 状态切换，一手牌开始后本手规则锁定。
 - 前端房间面板可以切换玩法，帮助按钮会显示当前玩法的牌型大小。
 
@@ -144,7 +146,8 @@ window.DZ_CONFIG = {
 - `players`: 玩家、筹码、当前下注、是否弃牌、手牌。
 - `committed`: 玩家本手累计投入，用于主池和边池切分。
 - `sittingOut`: 玩家是否暂时旁观。
-- `mode`: 当前玩法，`holdem` 或 `shortdeck`。
+- `mode`: 当前玩法，`holdem`、`shortdeck` 或 `ante`。
+- `ante`: 无盲注底注模式下每位参局玩家开局投入的金额。
 - `deck`: 洗好的牌堆。
 - `community`: 公共牌。
 - `phase`: 当前阶段，包含 `waiting`、`preflop`、`flop`、`turn`、`river`、`showdown`。
@@ -469,6 +472,7 @@ src/
 {"type":"create-room","room":"demo","name":"Alice","invite":"A1B2C3"}
 {"type":"join","room":"demo","name":"Alice"}
 {"type":"mode","mode":"shortdeck"}
+{"type":"ante","amount":50}
 {"type":"start"}
 {"type":"action","action":"call","amount":20}
 {"type":"sitout","sittingOut":true}

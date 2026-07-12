@@ -26,7 +26,7 @@
       <div class="game-grid">
         <button id="texasGameBtn" class="game-tile" type="button">
           <strong>德州扑克</strong>
-          <span>多人牌桌 · 标准 / 短牌</span>
+          <span>多人牌桌 · 标准 / 短牌 / 无盲底注</span>
           <em>进入</em>
         </button>
         <button class="game-tile coming-soon" type="button" disabled>
@@ -76,7 +76,7 @@
 
       <section class="rules-summary">
         <h2>游戏说明</h2>
-        <p>支持标准德州和短牌 6+。每人两张手牌，与五张公共牌组合出最佳五张牌；房主负责切换玩法和开局。</p>
+        <p>支持标准德州、短牌 6+ 和无盲注底注德州。每人两张手牌，与五张公共牌组合出最佳五张牌；房主负责切换玩法、设置底注和开局。</p>
       </section>
     </div>
   </section>
@@ -142,8 +142,14 @@
           <select id="modeSelect">
             <option value="holdem">标准德州</option>
             <option value="shortdeck">短牌 6+</option>
+            <option value="ante">无盲注底注德州</option>
           </select>
         </label>
+        <form id="anteForm" class="transfer" hidden>
+          <label for="anteAmount">每人底注</label>
+          <input id="anteAmount" type="number" min="1" max="100000" step="1" value="20">
+          <button type="submit">设置</button>
+        </form>
         <form id="transferForm" class="transfer">
           <select id="transferTarget" aria-label="转移目标"></select>
           <input id="transferAmount" type="number" min="1" step="1" value="100" aria-label="转移筹码数量">

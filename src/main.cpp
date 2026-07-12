@@ -166,10 +166,12 @@ struct Player {
     bool sitting_out = false;
     bool present = true;
     std::vector<Card> hole;
+    std::vector<Card> best_five;
+    std::string best_hand_name;
 };
 
 enum class Phase { Waiting, Preflop, Flop, Turn, River, Showdown };
-enum class GameMode { Holdem, ShortDeck };
+enum class GameMode { Holdem, ShortDeck, AnteHoldem };
 
 struct Room {
     std::string id;
@@ -190,6 +192,7 @@ struct Room {
     int pot = 0;
     int small_blind = 10;
     int big_blind = 20;
+    int ante = 20;
     GameMode mode = GameMode::Holdem;
     std::set<std::string> acted;
     std::unordered_map<std::string, int> last_action_bet;
@@ -239,6 +242,7 @@ private:
     void start_locked(const std::string& id, Room& room);
     void action_locked(const std::string& id, std::string action, int amount);
     void set_mode_locked(const std::string& id, std::string mode);
+    void set_ante_locked(const std::string& id, int ante);
     void set_sitting_out_locked(const std::string& id, bool sitting_out);
     void transfer_chips_locked(const std::string& id, std::string to, int amount);
     void advance_after_action_locked(Room& room);
@@ -335,14 +339,18 @@ private:
 };
 
 static std::string mode_text(GameMode mode) {
-    return mode == GameMode::ShortDeck ? "shortdeck" : "holdem";
+    if (mode == GameMode::ShortDeck) return "shortdeck";
+    if (mode == GameMode::AnteHoldem) return "ante";
+    return "holdem";
 }
 
 static GameMode parse_mode(std::string mode) {
     std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
-    return mode == "shortdeck" || mode == "short" || mode == "6plus" ? GameMode::ShortDeck : GameMode::Holdem;
+    if (mode == "shortdeck" || mode == "short" || mode == "6plus") return GameMode::ShortDeck;
+    if (mode == "ante" || mode == "anteholdem" || mode == "no-blind") return GameMode::AnteHoldem;
+    return GameMode::Holdem;
 }
 
 static std::vector<Card> new_deck(GameMode mode) {
@@ -465,15 +473,25 @@ static uint64_t evaluate_five_cards(const std::array<Card, 5>& cards, GameMode m
     return pack_hand(0, singles);
 }
 
-static uint64_t evaluate_best_hand(const std::vector<Card>& cards, GameMode mode) {
-    if (cards.size() < 5) return 0;
-    uint64_t best = 0;
+struct EvaluatedHand {
+    uint64_t value = 0;
+    std::vector<Card> cards;
+};
+
+static EvaluatedHand evaluate_best_hand_result(const std::vector<Card>& cards, GameMode mode) {
+    if (cards.size() < 5) return {};
+    EvaluatedHand best;
     for (size_t a = 0; a + 4 < cards.size(); ++a) {
         for (size_t b = a + 1; b + 3 < cards.size(); ++b) {
             for (size_t c = b + 1; c + 2 < cards.size(); ++c) {
                 for (size_t d = c + 1; d + 1 < cards.size(); ++d) {
                     for (size_t e = d + 1; e < cards.size(); ++e) {
-                        best = std::max(best, evaluate_five_cards({cards[a], cards[b], cards[c], cards[d], cards[e]}, mode));
+                        const uint64_t value = evaluate_five_cards(
+                            {cards[a], cards[b], cards[c], cards[d], cards[e]}, mode);
+                        if (value > best.value) {
+                            best.value = value;
+                            best.cards = {cards[a], cards[b], cards[c], cards[d], cards[e]};
+                        }
                     }
                 }
             }
@@ -684,6 +702,8 @@ void GameHub::on_message(const std::string& id, const std::string& text) {
         action_locked(id, json_string(text, "action").value_or("check"), json_int(text, "amount", 0));
     } else if (type == "mode") {
         set_mode_locked(id, json_string(text, "mode").value_or("holdem"));
+    } else if (type == "ante") {
+        set_ante_locked(id, json_int(text, "amount", 20));
     } else if (type == "sitout") {
         set_sitting_out_locked(id, json_bool(text, "sittingOut", true));
     } else if (type == "transfer") {
@@ -813,8 +833,8 @@ void GameHub::start_locked(const std::string& id, Room& room) {
     room.deck = new_deck(room.mode);
     room.community.clear();
     room.phase = Phase::Preflop;
-    room.highest_bet = room.big_blind;
-    room.min_raise = room.big_blind;
+    room.highest_bet = room.mode == GameMode::AnteHoldem ? 0 : room.big_blind;
+    room.min_raise = room.mode == GameMode::AnteHoldem ? room.ante : room.big_blind;
     room.pot = 0;
     room.reveal_cards = false;
     room.acted.clear();
@@ -827,6 +847,8 @@ void GameHub::start_locked(const std::string& id, Room& room) {
         p.folded = true;
         p.all_in = false;
         p.hole.clear();
+        p.best_five.clear();
+        p.best_hand_name.clear();
     }
 
     for (int index : playable) {
@@ -837,23 +859,40 @@ void GameHub::start_locked(const std::string& id, Room& room) {
     }
 
     room.dealer = next_playable_after_locked(room, room.dealer);
-    const int sb = playable.size() == 2 ? room.dealer : next_playable_after_locked(room, room.dealer);
-    const int bb = next_playable_after_locked(room, sb);
-    room.small_blind_index = sb;
-    room.big_blind_index = bb;
-    auto post = [&](int index, int amount) {
-        int paid = std::min(room.players[index].chips, amount);
-        room.players[index].chips -= paid;
-        room.players[index].bet += paid;
-        room.players[index].committed += paid;
-        room.pot += paid;
-    };
-    post(sb, room.small_blind);
-    post(bb, room.big_blind);
-    room.players[sb].all_in = room.players[sb].chips == 0;
-    room.players[bb].all_in = room.players[bb].chips == 0;
-    emit_event_locked(room, "新牌局开始（" + std::string(room.mode == GameMode::ShortDeck ? "短牌 6+" : "标准德州") + "）");
-    room.current = next_pending_actor_after_locked(room, bb);
+    int action_from = room.dealer;
+    if (room.mode == GameMode::AnteHoldem) {
+        room.small_blind_index = -1;
+        room.big_blind_index = -1;
+        for (int index : playable) {
+            Player& player = room.players[index];
+            const int paid = std::min(player.chips, room.ante);
+            player.chips -= paid;
+            player.committed += paid;
+            room.pot += paid;
+            player.all_in = player.chips == 0;
+        }
+    } else {
+        const int sb = playable.size() == 2 ? room.dealer : next_playable_after_locked(room, room.dealer);
+        const int bb = next_playable_after_locked(room, sb);
+        room.small_blind_index = sb;
+        room.big_blind_index = bb;
+        auto post_blind = [&](int index, int amount) {
+            int paid = std::min(room.players[index].chips, amount);
+            room.players[index].chips -= paid;
+            room.players[index].bet += paid;
+            room.players[index].committed += paid;
+            room.pot += paid;
+        };
+        post_blind(sb, room.small_blind);
+        post_blind(bb, room.big_blind);
+        room.players[sb].all_in = room.players[sb].chips == 0;
+        room.players[bb].all_in = room.players[bb].chips == 0;
+        action_from = bb;
+    }
+    const std::string mode_name = room.mode == GameMode::ShortDeck ? "短牌 6+"
+        : room.mode == GameMode::AnteHoldem ? "无盲注底注德州" : "标准德州";
+    emit_event_locked(room, "新牌局开始（" + mode_name + "）");
+    room.current = next_pending_actor_after_locked(room, action_from);
     ++room.action_serial;
     if (room.current < 0) {
         runout_to_showdown_locked(room);
@@ -881,9 +920,32 @@ void GameHub::set_mode_locked(const std::string& id, std::string mode) {
         return;
     }
     room.mode = parse_mode(std::move(mode));
-    emit_event_locked(room, "玩法切换为 " + std::string(room.mode == GameMode::ShortDeck ? "短牌" : "标准德州"));
+    const std::string mode_name = room.mode == GameMode::ShortDeck ? "短牌 6+"
+        : room.mode == GameMode::AnteHoldem ? "无盲注底注德州" : "标准德州";
+    emit_event_locked(room, "玩法切换为 " + mode_name);
     emit_state_locked(room);
     emit_lobby_locked();
+}
+
+void GameHub::set_ante_locked(const std::string& id, int ante) {
+    auto room_name = session_room_.find(id);
+    if (room_name == session_room_.end()) return;
+    Room& room = rooms_[room_name->second];
+    if (room.host_id != id) {
+        send_session_locked(id, "{\"type\":\"event\",\"message\":\"只有房主可以设置底注\"}");
+        return;
+    }
+    if (room.phase != Phase::Waiting) {
+        send_session_locked(id, "{\"type\":\"event\",\"message\":\"底注只能在等待状态修改\"}");
+        return;
+    }
+    if (ante < 1 || ante > 100000) {
+        send_session_locked(id, "{\"type\":\"event\",\"message\":\"底注必须在 1 到 100000 之间\"}");
+        return;
+    }
+    room.ante = ante;
+    emit_event_locked(room, "房主将每人底注设置为 " + std::to_string(ante));
+    emit_state_locked(room);
 }
 
 void GameHub::set_sitting_out_locked(const std::string& id, bool sitting_out) {
@@ -946,6 +1008,7 @@ void GameHub::action_locked(const std::string& id, std::string action, int amoun
     const int to_call = std::max(0, room.highest_bet - p.bet);
     const int stack_total = p.bet + p.chips;
     const int previous_highest = room.highest_bet;
+    const int minimum_bet = room.mode == GameMode::AnteHoldem ? room.ante : room.big_blind;
     std::string action_text;
 
     if (action == "fold") {
@@ -967,8 +1030,8 @@ void GameHub::action_locked(const std::string& id, std::string action, int amoun
         if (!can_raise_locked(room, p)) return;
         int target = std::min(amount, stack_total);
         if (target <= previous_highest) return;
-        const int min_target = room.highest_bet == 0 || room.highest_bet < room.big_blind
-            ? room.big_blind
+        const int min_target = room.highest_bet == 0 || room.highest_bet < minimum_bet
+            ? minimum_bet
             : room.highest_bet + room.min_raise;
         if (target < min_target && stack_total >= min_target) return;
         if (target <= p.bet) return;
@@ -980,11 +1043,11 @@ void GameHub::action_locked(const std::string& id, std::string action, int amoun
         p.all_in = p.chips == 0;
         if (p.bet > room.highest_bet) {
             room.highest_bet = p.bet;
-            const int raise_size = previous_highest < room.big_blind
+            const int raise_size = previous_highest < minimum_bet
                 ? room.highest_bet
                 : room.highest_bet - previous_highest;
             if (room.highest_bet >= min_target) {
-                room.min_raise = std::max(room.big_blind, raise_size);
+                room.min_raise = std::max(minimum_bet, raise_size);
                 room.acted.clear();
             }
         }
@@ -1083,7 +1146,7 @@ void GameHub::advance_after_action_locked(Room& room) {
 void GameHub::next_phase_locked(Room& room) {
     for (auto& p : room.players) p.bet = 0;
     room.highest_bet = 0;
-    room.min_raise = room.big_blind;
+    room.min_raise = room.mode == GameMode::AnteHoldem ? room.ante : room.big_blind;
     room.acted.clear();
     room.last_action_bet.clear();
     room.checked.clear();
@@ -1095,20 +1158,25 @@ void GameHub::next_phase_locked(Room& room) {
         }
     };
 
+    std::string phase_message;
     if (room.phase == Phase::Preflop) {
         draw(); draw(); draw();
         room.phase = Phase::Flop;
+        phase_message = "进入翻牌圈";
     } else if (room.phase == Phase::Flop) {
         draw();
         room.phase = Phase::Turn;
+        phase_message = "进入转牌圈";
     } else if (room.phase == Phase::Turn) {
         draw();
         room.phase = Phase::River;
+        phase_message = "进入河牌圈";
     } else if (room.phase == Phase::River) {
         settle_showdown_locked(room, "摊牌");
         return;
     }
 
+    if (!phase_message.empty()) emit_event_locked(room, phase_message);
     emit_lobby_locked();
 
     room.current = next_pending_actor_after_locked(room, room.dealer);
@@ -1184,11 +1252,14 @@ void GameHub::settle_showdown_locked(Room& room, std::string reason) {
 
     std::vector<Score> scores;
     for (int i = 0; i < static_cast<int>(room.players.size()); ++i) {
-        const auto& player = room.players[i];
+        auto& player = room.players[i];
         if (player.folded || player.committed <= 0) continue;
         std::vector<Card> seven = player.hole;
         seven.insert(seven.end(), room.community.begin(), room.community.end());
-        scores.push_back(Score{i, evaluate_best_hand(seven, room.mode)});
+        const auto evaluated = evaluate_best_hand_result(seven, room.mode);
+        player.best_five = evaluated.cards;
+        player.best_hand_name = hand_category_text(evaluated.value, room.mode);
+        scores.push_back(Score{i, evaluated.value});
     }
 
     if (scores.empty()) {
@@ -1314,7 +1385,7 @@ void GameHub::finish_hand_locked(Room& room) {
     }
     room.pot = 0;
     room.highest_bet = 0;
-    room.min_raise = room.big_blind;
+    room.min_raise = room.mode == GameMode::AnteHoldem ? room.ante : room.big_blind;
     room.reveal_cards = false;
     room.small_blind_index = -1;
     room.big_blind_index = -1;
@@ -1327,6 +1398,8 @@ void GameHub::finish_hand_locked(Room& room) {
         player.all_in = false;
         player.folded = player.sitting_out;
         player.hole.clear();
+        player.best_five.clear();
+        player.best_hand_name.clear();
     }
     for (int i = static_cast<int>(room.players.size()) - 1; i >= 0; --i) {
         if (!room.players[i].present) erase_player_locked(room, i);
@@ -1355,6 +1428,7 @@ void GameHub::emit_state_locked(const Room& room) {
            << ",\"minRaise\":" << room.min_raise
            << ",\"smallBlind\":" << room.small_blind
            << ",\"bigBlind\":" << room.big_blind
+           << ",\"ante\":" << room.ante
            << ",\"actionSerial\":" << room.action_serial
            << ",\"dealer\":\"" << (room.players.empty() || room.dealer < 0 || room.dealer >= static_cast<int>(room.players.size()) ? "" : json_escape(room.players[room.dealer].id))
            << "\",\"smallBlindPlayer\":\"" << (room.small_blind_index < 0 || room.small_blind_index >= static_cast<int>(room.players.size()) ? "" : json_escape(room.players[room.small_blind_index].id))
@@ -1414,7 +1488,17 @@ void GameHub::emit_state_locked(const Room& room) {
                 common << "\"" << p.hole[card_index].text() << "\"";
             }
         }
-        common << "]}";
+        common << "],\"bestCards\":[";
+        if (room.phase == Phase::Showdown && room.reveal_cards && !p.folded) {
+            for (size_t card_index = 0; card_index < p.best_five.size(); ++card_index) {
+                if (card_index) common << ",";
+                common << "\"" << p.best_five[card_index].text() << "\"";
+            }
+        }
+        common << "],\"handName\":\""
+               << (room.phase == Phase::Showdown && room.reveal_cards && !p.folded
+                   ? json_escape(p.best_hand_name) : "")
+               << "\"}";
     }
     common << "]}";
     const std::string public_state = common.str();
@@ -1452,6 +1536,7 @@ void GameHub::emit_lobby_locked() {
         out << "{\"id\":\"" << json_escape(room_id)
             << "\",\"players\":" << online
             << ",\"mode\":\"" << mode_text(room.mode)
+            << "\",\"ante\":" << room.ante
             << "\",\"phase\":\"" << phase_text(room.phase)
             << "\",\"private\":" << (room.invite_code.empty() ? "false" : "true")
             << "}";

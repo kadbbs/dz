@@ -602,6 +602,12 @@ video {
   color: #ffe19b;
 }
 
+.best-hand {
+  color: #fff1b8;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .quick-raises button {
   min-height: 34px;
   padding: 0 9px;

@@ -28,6 +28,8 @@ const els = {
   startBtn: document.querySelector('#startBtn'),
   sitOutBtn: document.querySelector('#sitOutBtn'),
   modeSelect: document.querySelector('#modeSelect'),
+  anteForm: document.querySelector('#anteForm'),
+  anteAmount: document.querySelector('#anteAmount'),
   helpBtn: document.querySelector('#helpBtn'),
   helpDialog: document.querySelector('#helpDialog'),
   closeHelpBtn: document.querySelector('#closeHelpBtn'),
@@ -213,7 +215,7 @@ function renderRoomList() {
     row.className = 'room-row';
     row.innerHTML = `
       <strong>${escapeHtml(room.id)} ${room.private ? '🔒' : ''}</strong>
-      <span>${room.players}/9 · ${room.mode === 'shortdeck' ? '短牌' : '标准'} · ${phaseNames[room.phase] || room.phase}</span>
+      <span>${room.players}/9 · ${room.mode === 'shortdeck' ? '短牌' : room.mode === 'ante' ? `无盲底注 ${room.ante}` : '标准'} · ${phaseNames[room.phase] || room.phase}</span>
       <button type="button">填写</button>
     `;
     row.querySelector('button').addEventListener('click', () => {
@@ -239,7 +241,9 @@ function renderState() {
     waiting: '等待开局', preflop: '翻牌前', flop: '翻牌圈', turn: '转牌圈', river: '河牌圈', showdown: '结算展示',
   };
   els.phase.textContent = phaseNames[state.phase] || state.phase || '等待开局';
-  els.pot.textContent = `${state.mode === 'shortdeck' ? '短牌 6+' : '标准德州'} · 底池 ${state.pot || 0}`;
+  const modeName = state.mode === 'shortdeck' ? '短牌 6+'
+    : state.mode === 'ante' ? `无盲底注 · 每人 ${state.ante || 0}` : '标准德州';
+  els.pot.textContent = `${modeName} · 底池 ${state.pot || 0}`;
   renderCards(els.community, state.community || []);
   const me = state.players?.find((player) => player.id === myId);
   const actor = state.players?.find((player) => player.id === state.toAct);
@@ -256,6 +260,10 @@ function renderState() {
   els.modeSelect.value = state.mode || 'holdem';
   els.modeSelect.disabled = state.phase !== 'waiting' || !isHost;
   els.modeSelect.title = isHost ? '' : '只有房主可以切换玩法';
+  els.anteForm.hidden = state.mode !== 'ante';
+  els.anteAmount.value = String(state.ante || 20);
+  els.anteAmount.disabled = state.phase !== 'waiting' || !isHost;
+  els.anteForm.querySelector('button').disabled = state.phase !== 'waiting' || !isHost;
   els.transferForm.classList.toggle('disabled', state.phase !== 'waiting');
   renderTransferTargets();
   renderActionControls(me);
@@ -283,7 +291,8 @@ function renderState() {
       ${player.committed ? `<span>本手 ${player.committed}</span>` : ''}
       ${player.allIn ? '<span>All-in</span>' : ''}
       ${player.sittingOut ? '<span>旁观</span>' : ''}
-      ${(player.cards || []).length ? `<div class="revealed-cards">摊牌：${player.cards.map(formatCardText).join(' ')}</div>` : ''}
+      ${(player.cards || []).length ? `<div class="revealed-cards">手牌：${player.cards.map(formatCardText).join(' ')}</div>` : ''}
+      ${(player.bestCards || []).length ? `<div class="best-hand">最佳五张（${escapeHtml(player.handName || '')}）：${player.bestCards.map(formatCardText).join(' ')}</div>` : ''}
     `;
     els.players.append(item);
   }
@@ -353,27 +362,31 @@ function updateTurnCountdown(myTurn, me) {
 
 function renderHelp() {
   const mode = state.mode || els.modeSelect.value || 'holdem';
-  els.helpTitle.textContent = mode === 'shortdeck' ? '短牌 6+ 牌型大小' : '标准德州牌型大小';
+  const rankingMode = mode === 'shortdeck' ? 'shortdeck' : 'holdem';
+  els.helpTitle.textContent = mode === 'shortdeck' ? '短牌 6+ 牌型大小'
+    : mode === 'ante' ? '无盲注底注德州规则' : '标准德州牌型大小';
   els.rankingList.innerHTML = '';
-  for (const item of handRankings[mode]) {
+  for (const item of handRankings[rankingMode]) {
     const li = document.createElement('li');
     li.textContent = item;
     els.rankingList.append(li);
   }
   els.helpNote.textContent = mode === 'shortdeck'
     ? '短牌使用 6 到 A 共 36 张牌；A 可以组成 A-6-7-8-9 顺子；本项目采用同花大于葫芦、三条大于顺子的短牌排序。'
-    : '标准德州使用 52 张牌；A 可以组成 A-2-3-4-5 顺子；同花小于葫芦，顺子大于三条。';
+    : mode === 'ante'
+      ? `使用标准 52 张牌和标准牌型。没有大小盲，每手开始所有参局玩家先投入 ${state.ante || 20} 底注，随后从庄家左侧开始行动。`
+      : '标准德州使用 52 张牌；A 可以组成 A-2-3-4-5 顺子；同花小于葫芦，顺子大于三条。';
 }
 
 function renderActionControls(me) {
-  const activeHand = state.phase && state.phase !== 'waiting';
+  const activeHand = state.phase && state.phase !== 'waiting' && state.phase !== 'showdown';
   const myTurn = activeHand && state.toAct === myId && me && !me.sittingOut && !me.folded && !me.allIn;
   const toCall = me ? Math.max(0, (state.highestBet || 0) - (me.bet || 0)) : 0;
   const stackTotal = me ? (me.bet || 0) + (me.chips || 0) : 0;
-  const bigBlind = state.bigBlind || 20;
-  const minRaise = state.minRaise || bigBlind;
-  const minRaiseTo = (state.highestBet || 0) === 0 || (state.highestBet || 0) < bigBlind
-    ? bigBlind
+  const minimumBet = state.mode === 'ante' ? (state.ante || 20) : (state.bigBlind || 20);
+  const minRaise = state.minRaise || minimumBet;
+  const minRaiseTo = (state.highestBet || 0) === 0 || (state.highestBet || 0) < minimumBet
+    ? minimumBet
     : (state.highestBet || 0) + minRaise;
   const shortAllInMin = (state.highestBet || 0) + 1;
   const legalRaiseMin = stackTotal >= minRaiseTo ? minRaiseTo : shortAllInMin;
@@ -404,6 +417,7 @@ function renderActionControls(me) {
 
 function renderTransferTargets() {
   const current = els.transferTarget.value;
+  const me = state.players?.find((player) => player.id === myId);
   els.transferTarget.innerHTML = '';
   const targets = (state.players || []).filter((player) => player.id !== myId);
   for (const player of targets) {
@@ -415,7 +429,12 @@ function renderTransferTargets() {
   if (targets.some((player) => player.id === current)) {
     els.transferTarget.value = current;
   }
-  const disabled = state.phase !== 'waiting' || targets.length === 0;
+  const available = Math.max(0, me?.chips || 0);
+  els.transferAmount.max = String(available);
+  if (Number(els.transferAmount.value || 0) > available) {
+    els.transferAmount.value = String(available);
+  }
+  const disabled = state.phase !== 'waiting' || targets.length === 0 || available <= 0;
   els.transferTarget.disabled = disabled;
   els.transferAmount.disabled = disabled;
   els.transferForm.querySelector('button').disabled = disabled;
@@ -708,6 +727,11 @@ els.startBtn.addEventListener('click', () => send({ type: 'start' }));
 els.modeSelect.addEventListener('change', () => {
   send({ type: 'mode', mode: els.modeSelect.value });
   renderHelp();
+});
+
+els.anteForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  send({ type: 'ante', amount: Number(els.anteAmount.value || 0) });
 });
 
 els.helpBtn.addEventListener('click', () => {
